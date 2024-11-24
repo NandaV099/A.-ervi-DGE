@@ -1,0 +1,544 @@
+---
+title: "GO Enrichment of differentially expressed genes of Aphedius ervi"
+author: "Nanda Vo"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+    theme: cerulean
+  pdf_document:
+    toc: yes
+---
+
+## Load needed libraries
+
+
+```{r Libraries, echo=TRUE, message=FALSE, warning=FALSE}
+# Load necessary libraries
+library(dplyr)
+library(readr)  # for reading the file
+library(stringr)  # for string manipulation
+library(tibble)
+library(topGO)
+library(ggplot2)
+
+
+# Set knitr root directory for knitting
+knitr::opts_knit$set(root.dir = "C:/Users/nanda/Desktop/Master Thesis")
+```
+
+
+##  Head tissue 
+
+
+```{r Head tissue, echo=TRUE, fig.show='hold', collapse=TRUE}
+setwd("C:/Users/nanda/Desktop/Master Thesis")
+
+#Head tissue
+
+      # Manually load the files for head tissue
+      head_conditioned <- read.csv("head_conditioned.csv", stringsAsFactors = FALSE)
+      head_experience <- read.csv("head_experience.csv", stringsAsFactors = FALSE)
+      head_line <- read.csv("head_line.csv", stringsAsFactors = FALSE)
+      
+      # Combine the head files
+      combined_head <- bind_rows(head_conditioned, head_experience, head_line)
+      
+      # Check the number of genes in combined head data
+      nrow(combined_head)
+      
+      # Get unique genes for head tissue
+      counts_genes_head <- unique(combined_head$Gene)
+      
+      # Now load the GFF3 data
+      gff_data <- read_delim("GO_annotations.txt", delim = "\t", comment = "#", col_names = FALSE)
+      
+      # Rename columns for GFF3 data
+      colnames(gff_data) <- c("seqid", "source", "type", "start", "end", "score", "strand", "phase", "attributes")
+      
+      # Extract gene IDs (before "-") for matching with head genes
+      gff_data <- gff_data %>%
+        mutate(GenePrefix = str_extract(seqid, "^[^\\-]+"))
+      
+      # Get unique gene prefixes
+      gff_genes <- unique(gff_data$GenePrefix)
+      
+      # Find overlapping genes between head genes and GFF3 data
+      common_genes_head <- intersect(toupper(counts_genes_head), toupper(gff_genes))
+      
+      # Create gene list for topGO
+      geneList_head <- factor(as.integer(toupper(gff_genes) %in% toupper(counts_genes_head)), levels = c(0, 1))
+      names(geneList_head) <- gff_genes
+      
+      # Check the gene list
+      table(geneList_head)
+
+    
+    
+#GO Enrichment    
+      
+      
+      # Prepare gene-to-GO mapping
+      gff_data <- gff_data %>%
+        mutate(GO_terms = str_extract(attributes, "GO:[^;]+")) %>%
+        filter(!is.na(GO_terms))
+      
+      gene2go <- gff_data %>%
+        group_by(GenePrefix) %>%
+        summarise(GO = paste(unique(GO_terms), collapse = ", ")) %>%
+        deframe()
+      
+      # Create topGO data object for head tissue (Biological Process)
+      GOdata_head_BP <- new("topGOdata", 
+                            ontology = "BP", 
+                            allGenes = geneList_head, 
+                            annot = annFUN.gene2GO, 
+                            gene2GO = gene2go)
+      
+      # Run GO enrichment test
+      resultFis_head_BP <- runTest(GOdata_head_BP, algorithm = "classic", statistic = "fisher")
+      
+      # Generate results table for significant GO terms
+      table_head_BP <- GenTable(GOdata_head_BP, classicFisher = resultFis_head_BP, orderBy = "classicFisher", topNodes = length(usedGO(GOdata_head_BP)))
+      
+      # Filter for significant GO terms
+      BP_sig_head <- subset(table_head_BP, classicFisher < 0.1)
+      
+      # Plot top 10 GO terms for head
+      if (nrow(BP_sig_head) > 0) {
+        BP_sig_head <- BP_sig_head[order(BP_sig_head$classicFisher), ]
+        top_GO_head <- head(BP_sig_head, 10)
+        top_GO_head$Term <- factor(top_GO_head$Term, levels = rev(top_GO_head$Term))
+        top_GO_head$classicFisher <- as.numeric(as.character(top_GO_head$classicFisher))
+        
+        # Plot bar plot
+        ggplot(top_GO_head, aes(x = Term, y = -log10(classicFisher))) + 
+          geom_bar(stat = "identity", fill = "skyblue") + 
+          coord_flip() + 
+          labs(title = "Top 10 GO Enrichment Terms for Head", 
+               x = "GO Term", 
+               y = "-log10(p-value)") + 
+          theme_minimal()
+      }
+
+```
+In total, 14863 out of 20226 genes from the dataset are annotated in the GFF file.
+
+Amongst the 1018 differentially expressed genes from the GLMM (glmmSeq) for head tissue (line = 186, conditioned = 904, and experience = 38, combined), 937 of them are annotated in the gff file.
+
+I had to relieve the p-value from classicFisher to <0.1, because for head tissue, none of the genes showed a p-value below 0.05. However, except for the GO term associated with defense mechanisms, the other 7 GO terms are associated to functions (cytoskeleton organization and microtubule regulation/organization), that contribute in the morphological development of the parasitoid wasps.
+
+
+##  Ovary tissue 
+
+
+```{r Ovary tissue, echo=TRUE, fig.show='hold', collapse=TRUE}
+
+      setwd("C:/Users/nanda/Desktop/Master Thesis")
+       
+      # Manually load the files for ovaries tissue
+      ovaries_conditioned <- read.csv("ovaries_conditioned.csv", stringsAsFactors = FALSE)
+      ovaries_experience <- read.csv("ovaries_experience.csv", stringsAsFactors = FALSE)
+      ovaries_line <- read.csv("ovaries_line.csv", stringsAsFactors = FALSE)
+            
+      # Combine the ovaries files
+      combined_ovaries <- bind_rows(ovaries_conditioned, ovaries_experience, ovaries_line)
+      
+      # Check the number of genes in combined ovaries data
+      nrow(combined_ovaries)
+      
+      # Get unique genes for ovaries tissue
+      counts_genes_ovaries <- unique(combined_ovaries$Gene)
+      
+      # Now load the GFF3 data (assuming it's the same)
+      gff_data <- read_delim("GO_annotations.txt", delim = "\t", comment = "#", col_names = FALSE)
+      
+      # Rename columns for GFF3 data
+      colnames(gff_data) <- c("seqid", "source", "type", "start", "end", "score", "strand", "phase", "attributes")
+      
+      # Extract gene IDs (before "-") for matching with ovaries genes
+      gff_data <- gff_data %>%
+        mutate(GenePrefix = str_extract(seqid, "^[^\\-]+"))
+      
+      # Get unique gene prefixes
+      gff_genes <- unique(gff_data$GenePrefix)
+      
+      # Find overlapping genes between ovaries genes and GFF3 data
+      common_genes_ovaries <- intersect(toupper(counts_genes_ovaries), toupper(gff_genes))
+      
+      # Create gene list for topGO
+      geneList_ovaries <- factor(as.integer(toupper(gff_genes) %in% toupper(counts_genes_ovaries)), levels = c(0, 1))
+      names(geneList_ovaries) <- gff_genes
+      
+      # Check the gene list
+      table(geneList_ovaries)
+      
+      
+# GO Enrichment
+      # Prepare gene-to-GO mapping
+      gff_data <- gff_data %>%
+        mutate(GO_terms = str_extract(attributes, "GO:[^;]+")) %>%
+        filter(!is.na(GO_terms))
+      
+      gene2go <- gff_data %>%
+        group_by(GenePrefix) %>%
+        summarise(GO = paste(unique(GO_terms), collapse = ", ")) %>%
+        deframe()
+      
+      # Create topGO data object for ovaries tissue (Biological Process)
+      GOdata_ovaries_BP <- new("topGOdata", 
+                               ontology = "BP", 
+                               allGenes = geneList_ovaries, 
+                               annot = annFUN.gene2GO, 
+                               gene2GO = gene2go)
+      
+      # Run GO enrichment test
+      resultFis_ovaries_BP <- runTest(GOdata_ovaries_BP, algorithm = "classic", statistic = "fisher")
+      
+      # Generate results table for significant GO terms
+      table_ovaries_BP <- GenTable(GOdata_ovaries_BP, classicFisher = resultFis_ovaries_BP, orderBy = "classicFisher", topNodes = length(usedGO(GOdata_ovaries_BP)))
+      
+      # Filter for significant GO terms
+      BP_sig_ovaries <- subset(table_ovaries_BP, classicFisher < 0.1)
+      
+      # Make the GO terms unique by appending GO ID to the term
+      BP_sig_ovaries$Term <- paste(BP_sig_ovaries$Term, BP_sig_ovaries$GO.ID, sep = " (")
+      
+      # Now ensure it closes the parentheses
+      BP_sig_ovaries$Term <- paste0(BP_sig_ovaries$Term, ")")
+      
+      # Plot top 10 GO terms for ovaries
+      if (nrow(BP_sig_ovaries) > 0) {
+        BP_sig_ovaries <- BP_sig_ovaries[order(BP_sig_ovaries$classicFisher), ]
+        top_GO_ovaries <- head(BP_sig_ovaries, 10)
+        
+        # Convert classicFisher to numeric
+        top_GO_ovaries$classicFisher <- as.numeric(as.character(top_GO_ovaries$classicFisher))
+        
+        # Plot bar plot
+        ggplot(top_GO_ovaries, aes(x = Term, y = -log10(classicFisher))) + 
+          geom_bar(stat = "identity", fill = "skyblue") + 
+          coord_flip() + 
+          labs(title = "Top 10 GO Enrichment Terms for Ovaries", 
+               x = "GO Term", 
+               y = "-log10(p-value)") + 
+          theme_minimal()
+      }
+```
+Out of the 195 significantly differentially expressed genes from the ovaries GLMM, 69 were labelled as interesting by topGO, or annotated in the GFF file.
+
+Again, we only have 8 significant or nearly GO terms. In this case, all GO terms except for those two associated to "protein metabolic processes" (p = 0.0681) and "organonitrogen compound metabolic processes" (p = 0.0890) are significant.
+All GO terms are associated to the synthesis of macromolecules such as proteins. Further insights into the actual function of these genes may give insight to the role of these genes towards host adaptation (synthesis of proteinbased toxins).
+
+## Venom gland tissue
+
+```{r Venom gland tissue, echo=TRUE, fig.show='hold', collapse=TRUE}
+setwd("C:/Users/nanda/Desktop/Master Thesis")
+
+       # Manually load the files for venom glands
+      venom_conditioned <- read.csv("venom_conditioned.csv", stringsAsFactors = FALSE)
+      venom_experience <- read.csv("venom_experience.csv", stringsAsFactors = FALSE)
+      venom_line <- read.csv("venom_line.csv", stringsAsFactors = FALSE)
+      
+      # Combine the venom glands files
+      combined_venom <- bind_rows(venom_conditioned, venom_experience, venom_line)
+      
+      # Check the number of genes in combined venom data
+      nrow(combined_venom)
+      
+      # Get unique genes for venom glands
+      counts_genes_venom <- unique(combined_venom$Gene)
+      
+      # Now load the GFF3 data if not already loaded (skip if already loaded)
+      # gff_data <- read_delim("GO_annotations.txt", delim = "\t", comment = "#", col_names = FALSE)
+      
+      # Rename columns for GFF3 data if not already renamed
+      # colnames(gff_data) <- c("seqid", "source", "type", "start", "end", "score", "strand", "phase", "attributes")
+      
+      # Extract gene IDs (before "-") for matching with venom genes
+      gff_data <- gff_data %>%
+        mutate(GenePrefix = str_extract(seqid, "^[^\\-]+"))
+      
+      # Get unique gene prefixes
+      gff_genes <- unique(gff_data$GenePrefix)
+      
+      # Find overlapping genes between venom genes and GFF3 data
+      common_genes_venom <- intersect(toupper(counts_genes_venom), toupper(gff_genes))
+      
+      # Create gene list for topGO
+      geneList_venom <- factor(as.integer(toupper(gff_genes) %in% toupper(counts_genes_venom)), levels = c(0, 1))
+      names(geneList_venom) <- gff_genes
+      
+      # Check the gene list
+      table(geneList_venom)
+      
+      
+#GO enrichment
+      # Prepare gene-to-GO mapping (if not done already)
+      gff_data <- gff_data %>%
+        mutate(GO_terms = str_extract(attributes, "GO:[^;]+")) %>%
+        filter(!is.na(GO_terms))
+      
+      gene2go <- gff_data %>%
+        group_by(GenePrefix) %>%
+        summarise(GO = paste(unique(GO_terms), collapse = ", ")) %>%
+        deframe()
+      
+      # Create topGO data object for venom glands (Biological Process)
+      GOdata_venom_BP <- new("topGOdata", 
+                             ontology = "BP", 
+                             allGenes = geneList_venom, 
+                             annot = annFUN.gene2GO, 
+                             gene2GO = gene2go)
+      
+      # Run GO enrichment test
+      resultFis_venom_BP <- runTest(GOdata_venom_BP, algorithm = "classic", statistic = "fisher")
+      
+      # Generate results table for significant GO terms
+      table_venom_BP <- GenTable(GOdata_venom_BP, classicFisher = resultFis_venom_BP, orderBy = "classicFisher", topNodes = length(usedGO(GOdata_venom_BP)))
+      
+      # Filter for significant GO terms
+      BP_sig_venom <- subset(table_venom_BP, classicFisher < 0.1)
+      
+      
+      # Plot top 10 GO terms for venom glands
+      if (nrow(BP_sig_venom) > 0) {
+        BP_sig_venom <- BP_sig_venom[order(BP_sig_venom$classicFisher), ]
+        top_GO_venom <- head(BP_sig_venom, 10)
+        
+        # Convert classicFisher to numeric
+        top_GO_venom$classicFisher <- as.numeric(as.character(top_GO_venom$classicFisher))
+        
+        # Make the GO terms unique by appending GO.ID to avoid duplication error
+        top_GO_venom$Term <- paste(top_GO_venom$Term, top_GO_venom$GO.ID, sep = " (")
+        top_GO_venom$Term <- paste0(top_GO_venom$Term, ")")
+        
+        # Create the bar plot
+        ggplot(top_GO_venom, aes(x = Term, y = -log10(classicFisher))) + 
+          geom_bar(stat = "identity", fill = "skyblue") + 
+          coord_flip() + 
+          labs(title = "Top 10 GO Enrichment Terms for Venom Glands", 
+               x = "GO Term", 
+               y = "-log10(p-value)") + 
+          theme_minimal()
+      }
+     
+```     
+
+
+Out of the 475 significantly differentially expressed genes from the GLMM for venom glands, 112 were labelled as interesting by topGO.
+
+The only significant GO term is associated to intracellular signal transduction (GO:0035556) (p = 0.017), 
+The GO terms for protein folding (GO:0006457) (p = 0.062), and protein maturation (GO:0051604)
+ (p = 0.077) are only nearly significant.
+ 
+
+
+## GO enrichment for each subtreatment x tissue type
+
+     
+```{r Subtreatment x tissue type, echo=TRUE, fig.show='hold', message=FALSE, warning=FALSE, collapse=TRUE}
+
+
+setwd("C:/Users/nanda/Desktop/Master Thesis")
+
+# GO enrichment for every subtreatment x tissue
+
+# Function to perform GO enrichment and create a plot with raw p-values
+perform_GO_enrichment_and_plot <- function(dataset_name, counts_genes, gff_genes, gene2go) {
+  # Find overlapping genes between dataset genes and GFF3 data
+  common_genes <- intersect(toupper(counts_genes), toupper(gff_genes))
+  cat("Number of overlapping genes for", dataset_name, ":", length(common_genes), "\n")
+  
+  # Create gene list for topGO
+  geneList <- factor(as.integer(toupper(gff_genes) %in% toupper(counts_genes)), levels = c(0, 1))
+  names(geneList) <- gff_genes
+  
+  # Create topGO data object (Biological Process)
+  GOdata <- new("topGOdata", 
+                ontology = "BP", 
+                allGenes = geneList, 
+                annot = annFUN.gene2GO, 
+                gene2GO = gene2go)
+  
+  # Run GO enrichment test
+  resultFis <- runTest(GOdata, algorithm = "classic", statistic = "fisher")
+  
+  # Generate results table for GO terms
+  table_BP <- GenTable(GOdata, classicFisher = resultFis, orderBy = "classicFisher", topNodes = length(usedGO(GOdata)))
+  
+  # Filter for significant GO terms (classicFisher < 0.1)
+  BP_sig <- subset(table_BP, classicFisher < 0.1)
+  
+  # Plot top 10 GO terms if available
+  plot <- NULL
+  if (nrow(BP_sig) > 0) {
+    BP_sig <- BP_sig[order(BP_sig$classicFisher), ]
+    top_GO <- head(BP_sig, 10)
+    
+    # Convert classicFisher to numeric
+    top_GO$classicFisher <- as.numeric(as.character(top_GO$classicFisher))
+    
+    # Make the GO terms unique by appending GO.ID to avoid duplication error
+    top_GO$Term <- paste(top_GO$Term, top_GO$GO.ID, sep = " (")
+    top_GO$Term <- paste0(top_GO$Term, ")")
+    
+    # Create the bar plot
+    plot <- ggplot(top_GO, aes(x = Term, y = classicFisher)) + 
+      geom_bar(stat = "identity", fill = "skyblue") + 
+      coord_flip() + 
+      labs(title = paste("Top 10 GO Enrichment Terms for", dataset_name), 
+           x = "GO Term", 
+           y = "Fisher p-value") + 
+      theme_minimal()
+  } else {
+    cat("No significant GO terms for", dataset_name, "\n")
+  }
+  
+  # Return the full table, significant table, and plot
+  return(list(full_table = table_BP, significant_genes = BP_sig, plot = plot))
+}
+
+# Load the GFF3 data
+gff_data <- read_delim("GO_annotations.txt", delim = "\t", comment = "#", col_names = FALSE)
+
+# Rename columns for GFF3 data
+colnames(gff_data) <- c("seqid", "source", "type", "start", "end", "score", "strand", "phase", "attributes")
+
+# Extract gene IDs (before "-") for matching with tissue-specific genes
+gff_data <- gff_data %>%
+  mutate(GenePrefix = str_extract(seqid, "^[^\\-]+"))
+
+# Get unique gene prefixes
+gff_genes <- unique(gff_data$GenePrefix)
+
+# Prepare gene-to-GO mapping
+gff_data <- gff_data %>%
+  mutate(GO_terms = str_extract(attributes, "GO:[^;]+")) %>%
+  filter(!is.na(GO_terms))
+
+gene2go <- gff_data %>%
+  group_by(GenePrefix) %>%
+  summarise(GO = paste(unique(GO_terms), collapse = ", ")) %>%
+  deframe()
+
+### HEAD TISSUE ###
+head_conditioned <- read.csv("head_conditioned.csv", stringsAsFactors = FALSE)
+head_experience <- read.csv("head_experience.csv", stringsAsFactors = FALSE)
+head_line <- read.csv("head_line.csv", stringsAsFactors = FALSE)
+
+# Create individual plots for each dataset
+head_conditioned_results <- perform_GO_enrichment_and_plot("Head_Conditioned", unique(head_conditioned$Gene), gff_genes, gene2go)
+head_experience_results <- perform_GO_enrichment_and_plot("Head_Experience", unique(head_experience$Gene), gff_genes, gene2go)
+head_line_results <- perform_GO_enrichment_and_plot("Head_Line", unique(head_line$Gene), gff_genes, gene2go)
+
+# Print plots
+if (!is.null(head_conditioned_results$plot)) print(head_conditioned_results$plot)
+if (!is.null(head_experience_results$plot)) print(head_experience_results$plot)
+if (!is.null(head_line_results$plot)) print(head_line_results$plot)
+
+# Save results to CSV
+write.csv(head_conditioned_results$full_table, "Head_Conditioned_Full_GO_Enrichment.csv", row.names = FALSE)
+write.csv(head_conditioned_results$significant_genes, "Head_Conditioned_Significant_GO_Enrichment.csv", row.names = FALSE)
+
+write.csv(head_experience_results$full_table, "Head_Experience_Full_GO_Enrichment.csv", row.names = FALSE)
+write.csv(head_experience_results$significant_genes, "Head_Experience_Significant_GO_Enrichment.csv", row.names = FALSE)
+
+write.csv(head_line_results$full_table, "Head_Line_Full_GO_Enrichment.csv", row.names = FALSE)
+write.csv(head_line_results$significant_genes, "Head_Line_Significant_GO_Enrichment.csv", row.names = FALSE)
+
+### OVARIES TISSUE ###
+ovaries_conditioned <- read.csv("ovaries_conditioned.csv", stringsAsFactors = FALSE)
+ovaries_experience <- read.csv("ovaries_experience.csv", stringsAsFactors = FALSE)
+ovaries_line <- read.csv("ovaries_line.csv", stringsAsFactors = FALSE)
+
+# Create individual plots for each dataset
+ovaries_conditioned_results <- perform_GO_enrichment_and_plot("Ovaries_Conditioned", unique(ovaries_conditioned$Gene), gff_genes, gene2go)
+ovaries_experience_results <- perform_GO_enrichment_and_plot("Ovaries_Experience", unique(ovaries_experience$Gene), gff_genes, gene2go)
+ovaries_line_results <- perform_GO_enrichment_and_plot("Ovaries_Line", unique(ovaries_line$Gene), gff_genes, gene2go)
+
+# Print plots
+if (!is.null(ovaries_conditioned_results$plot)) print(ovaries_conditioned_results$plot)
+if (!is.null(ovaries_experience_results$plot)) print(ovaries_experience_results$plot)
+if (!is.null(ovaries_line_results$plot)) print(ovaries_line_results$plot)
+
+# Save results to CSV
+write.csv(ovaries_conditioned_results$full_table, "Ovaries_Conditioned_Full_GO_Enrichment.csv", row.names = FALSE)
+write.csv(ovaries_conditioned_results$significant_genes, "Ovaries_Conditioned_Significant_GO_Enrichment.csv", row.names = FALSE)
+
+write.csv(ovaries_experience_results$full_table, "Ovaries_Experience_Full_GO_Enrichment.csv", row.names = FALSE)
+write.csv(ovaries_experience_results$significant_genes, "Ovaries_Experience_Significant_GO_Enrichment.csv", row.names = FALSE)
+
+write.csv(ovaries_line_results$full_table, "Ovaries_Line_Full_GO_Enrichment.csv", row.names = FALSE)
+write.csv(ovaries_line_results$significant_genes, "Ovaries_Line_Significant_GO_Enrichment.csv", row.names = FALSE)
+
+### VENOM GLANDS TISSUE ###
+venom_conditioned <- read.csv("venom_conditioned.csv", stringsAsFactors = FALSE)
+venom_experience <- read.csv("venom_experience.csv", stringsAsFactors = FALSE)
+venom_line <- read.csv("venom_line.csv", stringsAsFactors = FALSE)
+
+# Create individual plots for each dataset
+venom_conditioned_results <- perform_GO_enrichment_and_plot("Venom_Conditioned", unique(venom_conditioned$Gene), gff_genes, gene2go)
+venom_experience_results <- perform_GO_enrichment_and_plot("Venom_Experience", unique(venom_experience$Gene), gff_genes, gene2go)
+venom_line_results <- perform_GO_enrichment_and_plot("Venom_Line", unique(venom_line$Gene), gff_genes, gene2go)
+
+# Print plots
+if (!is.null(venom_conditioned_results$plot)) print(venom_conditioned_results$plot)
+if (!is.null(venom_experience_results$plot)) print(venom_experience_results$plot)
+if (!is.null(venom_line_results$plot)) print(venom_line_results$plot)
+
+# Save results to CSV
+write.csv(venom_conditioned_results$full_table, "Venom_Conditioned_Full_GO_Enrichment.csv", row.names = FALSE)
+write.csv(venom_conditioned_results$significant_genes, "Venom_Conditioned_Significant_GO_Enrichment.csv", row.names = FALSE)
+
+write.csv(venom_experience_results$full_table, "Venom_Experience_Full_GO_Enrichment.csv", row.names = FALSE)
+write.csv(venom_experience_results$significant_genes, "Venom_Experience_Significant_GO_Enrichment.csv", row.names = FALSE)
+
+write.csv(venom_line_results$full_table, "Venom_Line_Full_GO_Enrichment.csv", row.names = FALSE)
+write.csv(venom_line_results$significant_genes, "Venom_Line_Significant_GO_Enrichment.csv", row.names = FALSE)
+
+
+
+```
+## Overall GO enrichment results
+
+The following tables show the overall GO enrichment results, including non-significant GO terms.
+The overall tables (e.g. Head - Overall BP Results) are the results of the GO enrichment analyses with all sub-treatments (Line, Conditioned, Experience) combined into one dataframe (to create an overall list of significant genes per tissue type).
+
+```{r Tables of GO enrichments (including non-significant GO terms), echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+# Load knitr package
+library(knitr)
+
+# Create a function to generate collapsible tables
+create_collapsible_table <- function(data, title) {
+  cat("<details><summary>", title, "</summary>\n\n")
+  print(kable(data, format = "html", row.names = FALSE))
+  cat("\n</details>\n")
+}
+
+# Create collapsible tables for each subtreatment x tissue type
+create_collapsible_table(venom_line_results$full_table, "Venom - Line Results")
+create_collapsible_table(venom_conditioned_results$full_table, "Venom - Conditioned Results")
+create_collapsible_table(venom_experience_results$full_table, "Venom - Experience Results")
+
+create_collapsible_table(head_conditioned_results$full_table, "Head - Conditioned Results")
+create_collapsible_table(head_experience_results$full_table, "Head - Experience Results")
+create_collapsible_table(head_line_results$full_table, "Head - Line Results")
+
+create_collapsible_table(ovaries_conditioned_results$full_table, "Ovaries - Conditioned Results")
+create_collapsible_table(ovaries_experience_results$full_table, "Ovaries - Experience Results")
+create_collapsible_table(ovaries_line_results$full_table, "Ovaries - Line Results")
+
+# For each tissue's general table (table_tissue_BP)
+create_collapsible_table(table_head_BP, "Head - Overall BP Results")
+create_collapsible_table(table_ovaries_BP, "Ovaries - Overall BP Results")
+create_collapsible_table(table_venom_BP, "Venom - Overall BP Results")
+```
+
+ 
+## Summary
+ 
+ 
+ In summary, significant genes from the head tissue are associated with developmental proccesses. genes from ovary and venom gland tissues are associated with macromolecule synthesis and corresponding signaling pathways.
+

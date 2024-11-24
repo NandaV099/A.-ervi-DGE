@@ -1,0 +1,1817 @@
+---
+title: "The effects of body tissue and gene drift on the differential gene expression of Aphedius ervi"
+author: "Nanda Vo"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+    theme: cerulean
+  pdf_document:
+    toc: yes
+---
+GLMM:
+
+https://myles-lewis.github.io/glmmSeq/articles/glmmSeq.html#citing-glmmseq
+https://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html
+
+PCA:
+https://knowledge.dataiku.com/latest/ml-analytics/statistics/concept-principal-component-analysis-pca.html
+https://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#dispersion-plot-and-fitting-alternatives
+
+
+# Introduction
+
+This markdown file serves as workflow for the differential gene expression analysis on Aphedius ervi.
+In this thesis, I study two families of A. ervi, that were separately inbreded beforehand, to achieve genetic homogenity.
+
+The dataset consists of three treatment compartemnts: Line, Conditioned, and Experience.
+Line describes the lineage of the subjects. All parental generations were exclusively reared on the same type of host, PA (pea aphid) or FA (foxglove aphid).
+Conditioned describes the type of host, where the subjects emerged from.
+Experience describes the type of host, that was forced on the subject for ovipositioning. 
+
+In this thesis, I aim to study the relative contributions of the treatments (treatment components) on the differential gene expression of the studied individuals.
+
+
+```{r eval=FALSE, include=FALSE}
+# Install CRAN packages
+install.packages(c(
+  "car", "ggplot2", "ggpubr", "lme4", "lmerTest", "qvalue",
+  "knitr", "kableExtra", "tidyverse", "plyr", "dplyr","pvclust"
+))
+
+# Install Bioconductor packages
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+BiocManager::install(c("glmmSeq", "limma", "edgeR", "DESeq2"))
+
+```
+
+
+## Load needed libraries
+
+
+```{r Libraries, echo=TRUE, message=FALSE, warning=FALSE}
+# Load necessary libraries
+library(pvclust)
+library(glmmSeq)
+library(MASS)
+library(car)
+library(ggplot2)
+library(ggpubr)
+library(lme4)
+library(lmerTest)
+library(qvalue)
+library(limma)
+library(edgeR)
+library(knitr)
+library(kableExtra)
+library(qvalue)
+library(caret)
+library(lmerTest)
+library(glmmSeq)
+library(viridis)
+library(DESeq2)
+library(plyr)
+library(dplyr)
+library(DESeq2)
+library(edgeR)
+library(pheatmap)
+library(RColorBrewer)
+library(parallel)
+library(ggpubr)  # For adding p-values to plots
+library(ComplexHeatmap)
+library(circlize)
+library(kableExtra)
+library(VennDiagram)
+
+# Set knitr root directory for knitting
+knitr::opts_knit$set(root.dir = "C:/Users/nanda/Desktop/Master Thesis")
+```
+
+
+## Load the pre-processed count and sample tables into R.
+
+
+```{r Load data, echo=TRUE}
+setwd("C:/Users/nanda/Desktop/Master Thesis")
+# Load count data
+counts_data <- read.csv("counts.csv")
+# Set gene column as row names
+rownames(counts_data) <- counts_data$Gene
+# Remove Gene as a column
+counts_data$Gene <- NULL
+
+# Load sample data
+samples_data <- read.csv("samples.csv")
+# Set Sample column as row names
+rownames(samples_data) <- samples_data$Sample
+# Remove Sample as a column
+samples_data$Sample <- NULL
+# Normalize Treatment column
+samples_data$Treatment <- gsub("-", "_", samples_data$Treatment)
+
+# Filter out samples where 'Line' contains "G(FA)"
+samples_data <- samples_data %>%
+  filter(!grepl("G\\(FA\\)", Line))
+
+# Ensure counts_data has columns that match filtered samples_data rows
+counts_data <- counts_data[, colnames(counts_data) %in% rownames(samples_data)]
+
+# Double check matching rows and columns of samples and counts
+if (!all(colnames(counts_data) %in% rownames(samples_data))) {
+  stop("Mismatch between samples and counts data.")
+}
+if (!all(colnames(counts_data) == rownames(samples_data))) {
+  stop("Order of samples and counts data do not match.")
+}
+```
+
+
+## Filter data by CPM
+Now, we filter or count data by removing genes with a CPM (counts per million) below 1, using edgeR.
+Out of 20226 genes, we removed 1881.
+
+```{r Filter by CPM, include=TRUE}
+# Create a DGEList object for edgeR
+dge <- DGEList(counts = counts_data)
+
+# Calculate CPM
+cpm_data <- cpm(dge)
+
+# Define a filter threshold (1 CPM)
+cpm_threshold <- 1
+keep <- rowSums(cpm_data >= cpm_threshold) >= 1
+dge <- dge[keep,]
+dim(dge)
+
+# Filter the count data
+filtered_counts_data <- counts_data[keep, ]
+```
+
+
+## DESeq2 dds object
+DGE analysis with DESeq2 using following model: counts ~ Line + Conditioned + Experience + Tissue + Family.
+I use DESeq2 to get an overall impression of the differentiality of gene expression profiles. This means that I aim to compare the overall expression profile of the individuals for the beginning.
+
+
+
+```{r DGE model, echo=TRUE, fig.show='hold', message=FALSE, warning=FALSE, collapse=TRUE}
+# Create DESeq2 object
+dds <- DESeqDataSetFromMatrix(countData = filtered_counts_data,
+                              colData = samples_data,
+                              design = ~  Line + Conditioned + Experience + Tissue + Family)
+
+# Perform differential expression analysis
+dds <- DESeq(dds)
+
+#save dds object
+#saveRDS(dds, file = "dds_model.rds")
+  #load it
+  #dds <- readRDS("dds_model.rds")
+
+
+```
+
+
+## Gene dispersion and normalized counts
+Calculate dispersions and normalize counts.
+The dispersion represents the variability of gene expression levels.
+
+The normalization by size factors corrects for sequencing depths
+(important for avoiding false negatives for lowly expressed genes)
+
+Also apply variance stabilizing transformation on data
+
+
+
+```{r Dispersion and count normalization, echo=TRUE, fig.show='hold', collapse=TRUE}
+
+ # Estimate dispersions (this is already done during the DESeq call)
+        dds <- estimateDispersions(dds)
+        dispersions <- dispersions(dds)
+        dispersions <- setNames(dispersions, rownames(filtered_counts_data))
+        
+        # Estimate size factors (this is also done during DESeq normalization)
+        dds <- estimateSizeFactors(dds)
+        size_factors <- sizeFactors(dds)
+
+        # Normalize counts by size factors
+        normalized_counts <- counts(dds, normalized = TRUE)
+      
+      
+        # Plot dispersion estimates
+        plotDispEsts(dds)
+
+      
+        # Variance stabilizing transformation (VST); DESeq2 usually uses normalized counts for the VST 
+        vst_dds <- vst(dds)
+        
+        # You can use the transformed data for PCA or clustering
+        vst_counts <- assay(vst_dds)
+```
+
+
+## PCA by tissue
+Do PCA with the top 500 most variable genes. For the beginning, I'm separating by tissue type.
+
+
+
+```{r PCA by tissue type, echo=TRUE, fig.show='hold', collapse=TRUE}
+# PCA plot by tissue
+# Identify the variance for each gene
+gene_variances <- apply(vst_counts, 1, var)
+
+# Select the top 500 most variable genes
+top_500_genes <- order(gene_variances, decreasing = TRUE)[1:500]
+
+# Subset the VST data to include only these top 500 genes
+vst_counts_top_500 <- vst_counts[top_500_genes, ]
+
+# Perform PCA on the filtered VST data for the top 500 genes
+pca_top_500 <- prcomp(t(vst_counts_top_500), scale. = TRUE)
+
+# Calculate the percentage of variance explained by PC1 and PC2
+explained_variance <- summary(pca_top_500)$importance[2, ]
+pc1_var <- round(explained_variance[1] * 100, 2)
+pc2_var <- round(explained_variance[2] * 100, 2)
+
+# Create a data frame with PCA results and sample metadata
+pca_data_top_500 <- as.data.frame(pca_top_500$x)
+pca_data_top_500$Tissue <- samples_data$Tissue
+
+# Enhanced PCA plot with borders only on x and y axes
+library(ggplot2)
+
+# Create PCA plot with publication-ready customizations
+ggplot(pca_data_top_500, aes(x = PC1, y = PC2, color = Tissue)) +
+  geom_point(size = 3, alpha = 0.9) +  # Increase point opacity for distinct visualization
+  scale_color_brewer(palette = "Dark2", name = "Tissue origin",  # Use a color palette similar to the reference
+                     labels = c("Head", "Ovaries", "Venom glands")) + 
+  labs(
+    title = "PCA of All Tissue Origins (Top 500 Most Variable Genes)",
+    x = paste0("PC1 (", pc1_var, "% variance)"),
+    y = paste0("PC2 (", pc2_var, "% variance)")
+  ) +
+  theme_minimal(base_size = 14) +  # Larger base font size for readability
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),  # Center the title and make it bold
+    axis.title = element_text(face = "bold"),  # Bold axis titles
+    legend.position = "bottom",  # Place legend at the bottom
+    legend.key = element_blank(),  # Remove legend key rectangles
+    panel.grid.major = element_line(color = "gray80"),  # Subtle major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.line = element_line(color = "black", linewidth = 0.8)  # Add borders only to x and y axes
+  )
+        
+```
+
+## PCA within tissue by family
+Since the expression profiles are clearly clustered by tissue (and high percentages for PC 1), 
+I'll do a PCA within each tissue type, separating by family as well.
+The separation implies that each tissue type has a distinct group of expressed genes. I'll also verify it later by creating tables showing the number of overlapping genes between tissue types. (glmmSeq section)
+
+
+```{r PCA within tissue, separating by family, echo=TRUE, fig.show='hold', collapse=TRUE}
+# Load necessary libraries
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(viridis)
+
+# Custom publishable theme for consistent styling
+theme_publishable <- function() {
+  theme_minimal() +
+    theme(
+      panel.grid = element_blank(),  # Remove grid lines
+      axis.line = element_line(color = "black", size = 1),  # Thick axis lines
+      axis.ticks = element_line(color = "black", size = 0.8),  # Thick axis ticks
+      legend.position = "none",  # Remove individual plot legends
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 14),  # Center and bold title
+      axis.title = element_text(face = "bold", size = 12),  # Bold axis titles
+      axis.text = element_text(size = 10)  # Adjust axis text size
+    )
+}
+
+# Function to extract the legend as a "shared x-axis"
+get_shared_legend <- function() {
+  legend_plot <- ggplot(data.frame(x = c(1, 2), y = c(1, 2), label = c("F34", "F39")), aes(x, y, color = label)) +
+    geom_point(size = 4) +
+    scale_color_manual(
+      values = c("F34" = "#8856a7", "F39" = "#f03b20"),  # Purple and Orange
+      name = "Family"
+    ) +
+    guides(color = guide_legend(override.aes = list(size = 5))) +
+    theme_minimal() +
+    theme(
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold", size = 12),
+      legend.text = element_text(size = 10),
+      panel.grid = element_blank(),
+      axis.line = element_blank(),
+      axis.ticks = element_blank(),
+      axis.text = element_blank(),
+      axis.title = element_blank()
+    )
+  
+  # Extract legend as grob
+  return(get_legend(legend_plot))
+}
+
+# Function to perform PCA and create styled plots
+perform_pca <- function(tissue_name, normalized_counts, samples_data) {
+  
+  # Subset samples_data for the specified tissue
+  tissue_samples <- samples_data[samples_data$Tissue == tissue_name, ]
+  
+  # Subset normalized counts data for the specified tissue
+  tissue_counts <- normalized_counts[, rownames(tissue_samples)]
+  
+  # Identify the variance for each gene
+  gene_variances <- apply(tissue_counts, 1, var)
+  
+  # Select the top 500 most variable genes
+  top_500_genes <- order(gene_variances, decreasing = TRUE)[1:500]
+  
+  # Subset the data to include only the top 500 most variable genes
+  tissue_counts_top_500 <- tissue_counts[top_500_genes, ]
+  
+  # Remove zero-variance columns
+  zero_variance_filter <- apply(tissue_counts_top_500, 1, var) > 0
+  tissue_counts_top_500 <- tissue_counts_top_500[zero_variance_filter, ]
+  
+  # Perform PCA
+  pca_result <- prcomp(t(tissue_counts_top_500), scale. = TRUE)
+  
+  # Calculate percentage of variance explained by PC1 and PC2
+  explained_variance <- summary(pca_result)$importance[2, ]
+  pc1_var <- round(explained_variance[1] * 100, 2)
+  pc2_var <- round(explained_variance[2] * 100, 2)
+  
+  # Create a data frame with PCA results and metadata
+  pca_data <- as.data.frame(pca_result$x)
+  pca_data$Family <- tissue_samples$Family
+  
+  # Adjust the title to use tissue names
+  plot_title <- switch(
+    tissue_name,
+    "head" = "Head",
+    "ovaries" = "Ovaries",
+    "venom" = "Venom Glands"
+  )
+  
+  # Create PCA plot with Purple and Orange colors
+  pca_plot <- ggplot(pca_data, aes(x = PC1, y = PC2, color = Family)) +
+    geom_point(size = 3, alpha = 0.9) +  # Adjusted point size and transparency
+    scale_color_manual(
+      values = c("F34" = "#8856a7", "F39" = "#f03b20"),  # Purple and Orange
+      name = "Family"
+    ) +
+    labs(
+      title = plot_title,
+      x = paste0("PC1 (", pc1_var, "% variance)"),
+      y = paste0("PC2 (", pc2_var, "% variance)")
+    ) +
+    theme_publishable()
+  
+  return(pca_plot)
+}
+
+# Create individual plots for each tissue
+pca_head_plot <- perform_pca("head", normalized_counts, samples_data)
+pca_ovaries_plot <- perform_pca("ovaries", normalized_counts, samples_data)
+pca_venom_plot <- perform_pca("venom", normalized_counts, samples_data)
+
+# Get shared legend as a "shared x-axis"
+shared_legend <- get_shared_legend()
+
+# Combine the plots with the shared legend
+final_plot <- grid.arrange(
+  arrangeGrob(
+    pca_head_plot,
+    pca_ovaries_plot,
+    pca_venom_plot,
+    ncol = 3
+  ),
+  shared_legend,
+  ncol = 1,
+  heights = c(10, 1)  # Shared legend acts as a bottom "x-axis"
+)
+
+# Save the final plot as a high-resolution TIFF
+ggsave("PCA_Final_Plots_with_Shared_X_Legend.tiff", plot = final_plot, width = 16, height = 6, dpi = 300, units = "in")
+
+```
+Head and venom tissues show clear separation between families, mostly represented by PC 1.
+This implies that the family has the biggest effect on the separation between those two distinct clusters.
+For the ovaries, the families show two distinct clusters as well, but mostly represented by PC 2. Consequently, there may be another factor that contributes more in the variance of the mean ovary expression profiles (of the top 500 most variable genes) of the samples.
+
+
+
+
+```{r Loading bar plots, separating by family, echo=TRUE, fig.show='hold', collapse=TRUE}
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(gridExtra)
+library(viridis)
+library(grid)
+
+# Custom publishable theme
+theme_publishable <- function() {
+  theme_minimal() +
+    theme(
+      panel.grid = element_blank(),  # Remove grid lines
+      panel.border = element_blank(),  # Remove full plot border
+      axis.line = element_line(color = "black", size = 1),  # Add lines only to the axes
+      axis.ticks = element_line(color = "black"),  # Add axis ticks
+      axis.text.x = element_blank(),  # Remove x-axis text labels
+      axis.ticks.x = element_blank(),  # Remove x-axis ticks
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold"),
+      legend.box = "horizontal",
+      legend.text = element_text(size = 10),
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      axis.title.x = element_blank(),  # Remove x-axis title
+      axis.title.y = element_text(face = "bold", size = 14)  # Enable y-axis title for tissue labels
+    )
+}
+
+# Function to create loading plots for specified PCs
+create_loading_plots <- function(pcs = c(1, 2, 3, 4)) {
+  all_plots_list <- list()
+  tissue_labels <- c("Head", "Ovaries", "Venom Glands")  # Labels for the rows
+  
+  row_counter <- 1  # Track rows for assigning tissue labels
+  
+  for (tissue in unique(samples_data$Tissue)) {
+    cat("\nPerforming PCA and generating loading plots for Tissue:", tissue, "\n")
+    
+    # Subset the samples_data and vst_counts for this tissue type
+    tissue_samples_data <- samples_data[samples_data$Tissue == tissue, c("Line", "Conditioned", "Experience", "Family")]
+    tissue_vst_counts <- vst_counts[, samples_data$Tissue == tissue]
+    
+    # Convert categorical variables to one-hot encoded numeric variables for the sub-treatments
+    dummies <- dummyVars("~ .", data = tissue_samples_data)
+    sub_treatments_numeric <- predict(dummies, newdata = tissue_samples_data)
+    
+    # Identify the variance for each gene for this tissue
+    gene_variances <- apply(tissue_vst_counts, 1, var)
+    
+    # Select the top 500 most variable genes for this tissue
+    top_500_genes <- order(gene_variances, decreasing = TRUE)[1:500]
+    
+    # Subset the VST data to include only the top 500 most variable genes
+    vst_counts_top_500 <- tissue_vst_counts[top_500_genes, ]
+    
+    # Transpose the VST counts so that samples are rows and genes are columns
+    vst_counts_top_500_t <- t(vst_counts_top_500)
+    
+    # Perform PCA on the combined data (samples as rows, sub-treatments and genes as variables)
+    combined_data <- cbind(sub_treatments_numeric, vst_counts_top_500_t)
+    pca_tissue <- prcomp(combined_data, scale. = TRUE)
+    
+    # Extract loadings (contributions) for the specified PCs
+    loadings <- as.data.frame(pca_tissue$rotation[, pcs])
+    loadings$variable <- rownames(loadings)
+    
+    # Filter the loadings for sub-treatments only
+    sub_treatment_loadings <- loadings[rownames(loadings) %in% colnames(sub_treatments_numeric), ]
+    
+    # Combine loadings for each main variable (sum of absolute loadings across levels)
+    sub_treatment_loadings$main_variable <- gsub("[0-9A-Z]+$", "", sub_treatment_loadings$variable)  # Properly label main variables
+    loadings_summary <- sub_treatment_loadings %>%
+      group_by(main_variable) %>%
+      summarize(across(starts_with("PC"), ~ sum(abs(.)), .names = "abs_{.col}"))  # Sum absolute loadings
+    
+    # Order the variables for plotting
+    variable_order <- c("Family", "Line", "Conditioned", "Experience")
+    loadings_summary$main_variable <- factor(loadings_summary$main_variable, levels = variable_order)
+    
+    # Create a list to store the plots for specified PCs
+    for (pc in pcs) {
+      pc_column <- paste0("abs_PC", pc)
+      
+      # Dynamically create a data frame for plotting
+      loadings_to_plot <- data.frame(
+        main_variable = loadings_summary$main_variable,
+        loading_value = loadings_summary[[pc_column]]
+      )
+      
+      # Plot for each PC
+      p <- ggplot(loadings_to_plot, aes(x = main_variable, y = loading_value, fill = main_variable)) +
+        geom_bar(stat = "identity", color = "black") +  # Add border to bars
+        scale_fill_viridis_d(option = "C", direction = 1, name = "Sub-Treatments") +
+        labs(
+          title = if (row_counter == 1) paste("Loadings for PC", pc) else NULL,
+          y = if (pc == pcs[1]) tissue_labels[row_counter] else NULL  # Add tissue label as y-axis title for the first column
+        ) +
+        theme_publishable() +
+        theme(
+          legend.position = "none",  # Remove legends for individual plots
+          axis.text.x = element_blank(),  # Remove x-axis labels
+          axis.ticks.x = element_blank()  # Remove x-axis ticks
+        )
+      
+      # Add the plot to the list
+      all_plots_list <- c(all_plots_list, list(p))
+    }
+    
+    # Increment the row counter for tissue labels
+    row_counter <- row_counter + 1
+  }
+  
+  # Combine all plots into a grid
+  arranged_plots <- grid.arrange(
+    grobs = all_plots_list,
+    ncol = 4,
+    nrow = 3,
+    left = textGrob("Absolute Loadings", rot = 90, vjust = 0.5, gp = gpar(fontsize = 14, fontface = "bold")),  # Shared y-axis label
+    bottom = get_legend(all_plots_list[[1]] + theme(legend.position = "bottom"))  # Shared legend
+  )
+  
+  return(arranged_plots)
+}
+
+# Create and display the final plot
+final_plot <- create_loading_plots(pcs = c(1, 2, 3, 4))
+
+# Save the final plot
+ggsave("final_plot_with_correct_tissue_labels.tiff", final_plot, width = 16, height = 12, dpi = 300, units = "in")
+
+
+```
+
+
+## Volcano plots within tissue by family
+The following volcano plots underline these findings.
+
+
+```{r Volcano plots within each tissue, separating by family, echo=TRUE, fig.show='hold', collapse=TRUE}
+ #volcano plots between families within each treatment
+          # Define the volcano plot function for comparing Family F34 vs F39 within a tissue
+          perform_volcano_plot_family_comparison <- function(tissue_name, normalized_counts, samples_data) {
+            
+            # Subset the samples_data for the specified tissue
+            tissue_samples <- samples_data[samples_data$Tissue == tissue_name & samples_data$Family %in% c("F34", "F39"), ]
+            
+            # Subset the normalized counts data for the specified tissue
+            tissue_counts <- normalized_counts[, rownames(tissue_samples)]
+            
+            # Ensure the Family column is recognized as a factor
+            tissue_samples$Family <- factor(tissue_samples$Family)
+            
+            # Calculate log2 fold changes and p-values between Family F34 and F39
+            log2_fc <- apply(tissue_counts, 1, function(gene_counts) {
+              mean(gene_counts[tissue_samples$Family == "F39"]) - 
+                mean(gene_counts[tissue_samples$Family == "F34"])
+            })
+            
+            # Perform t-tests to get p-values
+            p_values <- apply(tissue_counts, 1, function(gene_counts) {
+              t.test(gene_counts[tissue_samples$Family == "F34"], 
+                     gene_counts[tissue_samples$Family == "F39"])$p.value
+            })
+            
+            # Create a data frame with the results
+            results <- data.frame(
+              Gene = rownames(tissue_counts),
+              log2FC = log2_fc,
+              p_value = p_values,
+              neg_log10_p_value = -log10(p_values)
+            )
+            
+            # Filter out rows with NA, Inf, or -Inf values
+            results <- results %>%
+              filter(!is.na(log2FC) & !is.infinite(log2FC) &
+                       !is.na(neg_log10_p_value) & !is.infinite(neg_log10_p_value))
+            
+            # Determine significance (adjust as needed, e.g., p < 0.05 and |log2FC| > 1)
+            results$Significant <- "Not Significant"
+            results$Significant[results$p_value < 0.05 & results$log2FC > 1] <- "Up"
+            results$Significant[results$p_value < 0.05 & results$log2FC < -1] <- "Down"
+            
+            # Create the volcano plot comparing F34 vs F39
+            volcano_plot <- ggplot(results, aes(x = log2FC, y = neg_log10_p_value, color = Significant)) +
+              geom_point(size = 2) +
+              scale_color_manual(values = c("Not Significant" = "gray", "Up" = "red", "Down" = "blue")) +
+              labs(title = paste("Volcano Plot for", tissue_name, "Tissue - F34 vs F39"),
+                   x = "Log2 Fold Change (F39 vs F34)",
+                   y = "-Log10(P-Value)") +
+              geom_vline(xintercept = c(-1, 1), linetype = "dashed") +  # Add vertical lines at log2FC = ±1
+              geom_hline(yintercept = -log10(0.05), linetype = "dashed") +  # Add horizontal line at p = 0.05
+              theme_minimal()
+            
+            return(volcano_plot)
+          }
+          
+          # Example usage for all tissues
+          volcano_head_plot <- perform_volcano_plot_family_comparison("head", normalized_counts, samples_data)
+          volcano_ovaries_plot <- perform_volcano_plot_family_comparison("ovaries", normalized_counts, samples_data)
+          volcano_venom_plot <- perform_volcano_plot_family_comparison("venom", normalized_counts, samples_data)
+          
+          # Display the plots for F34 vs F39 in each tissue
+          print(volcano_head_plot)  # Volcano plot for head tissue (F34 vs F39)
+          print(volcano_ovaries_plot)  # Volcano plot for ovaries tissue (F34 vs F39)
+          print(volcano_venom_plot)  # Volcano plot for venom tissue (F34 vs F39)
+```
+The majority of the individuals genes show a clear up- (positive LFC) or downregulation (negative LFC).
+
+
+
+
+## GLMMs for each tissue
+### GLMM for head
+Finally, I'll proceed with GLMMs to identify sets of significantly differentially expressed genes.
+Due to the high differentiality caused by the families (PCA plots within each tissue and by family), My GLMMs will incorporate the family as random effect. By doing so, I aim to identify sets of genes, that are reliably differentially expressed in both families.
+
+
+All models use following design: ~ Line + Conditioned + Experience + (1 | Family)
+I'll use DESeq2 to acquire subsetted processed count data first
+
+Following chunk filters the data and runs the GLMM for head tissue.
+
+
+```{r GLMM head, echo=TRUE, fig.show='hold', message=FALSE, warning=FALSE, collapse=TRUE}
+# Subset the data for head tissue
+#model for head
+      # Subset the data for head tissue
+      head_samples_data <- samples_data[samples_data$Tissue == "head", ]
+      head_counts_data <- filtered_counts_data[, rownames(head_samples_data)]
+      
+      # Create DESeq2 object for head tissue
+      dds_head <- DESeqDataSetFromMatrix(countData = head_counts_data,
+                                        colData = head_samples_data,
+                                        design = ~ Line + Conditioned + Experience + Family)
+      
+      # Perform DESeq normalization and dispersion estimation for head tissue
+      dds_head <- DESeq(dds_head)
+      dispersions_head <- dispersions(dds_head)
+      dispersions_head <- setNames(dispersions_head, rownames(head_counts_data))
+      size_factors_head <- sizeFactors(dds_head)
+      
+      # Normalize counts by size factors
+      normalized_counts_head <- sweep(head_counts_data, 2, size_factors_head, "/")
+      
+      # Fit the glmmSeq model for head tissue
+      #fit_head <- glmmSeq(~ Line + Conditioned + Experience + (1 | Family),
+      #                    countdata = normalized_counts_head,
+       #                   metadata = head_samples_data,
+        #                  dispersion = dispersions_head,
+         #                 family = "nbinom",
+          #                progress = TRUE)
+      
+      # Save and print results for head tissue
+      #saveRDS(fit_head, file = "fit_head_norm.rds")
+      fit_head <- readRDS("fit_head_norm.rds")
+          #fit_head <- readRDS("fit_head.rds") #alternatively to the counts normalized by size factors
+
+      results_head <- summary(fit_head)
+      #print(results_head)
+      
+      # Save the q-value results for head tissue
+      qval_results_head <- glmmQvals(fit_head)
+```      
+The model for head tissue removed 2568 genes due to high singularity, which means that the coefficients' degree correlation is too high to calculate distinct effects from each separate coefficient.
+However, for Line, the model highlighted 186, for Conditioned 904, and for Experience 38 significantly differentially expressed genes after correcting for family as random effect.
+
+#### Model choice - Head
+I'll also check other possible models (with interaction terms) and compare AIC scores in order to pick the best fitting model.
+
+
+```{r GLMM head model choice, echo=TRUE, fig.show='hold', message=FALSE, warning=FALSE, collapse=TRUE}
+
+# Fit the remaining glmmSeq models for head tissue
+#head2 <- glmmSeq(~ Line + Conditioned * Experience + (1 | Family),
+ #                countdata = normalized_counts_head,
+  #               metadata = head_samples_data,
+   #              dispersion = dispersions_head,
+    #             family = "nbinom",
+     #            progress = TRUE)
+
+
+                 
+#head3 <- glmmSeq(~ Line * Conditioned * Experience + (1 | Family),
+ #                countdata = normalized_counts_head,
+  #               metadata = head_samples_data,
+   #              dispersion = dispersions_head,
+    #             family = "nbinom",
+     #            progress = TRUE)
+
+
+
+#head4 <- glmmSeq(~ Line * Conditioned + Experience + (1 | Family),
+ #                countdata = normalized_counts_head,
+  #               metadata = head_samples_data,
+   #              dispersion = dispersions_head,
+    #             family = "nbinom",
+     #            progress = TRUE)
+
+
+
+# Load your GLMM models (assuming they are saved as .RDS files in your working directory)
+
+head1 <- readRDS("fit_head_norm.rds")
+head2 <- readRDS("C:/Users/nanda/Desktop/Master Thesis/head2_glmmSeq.rds")
+head3 <- readRDS("C:/Users/nanda/Desktop/Master Thesis/head3_glmmSeq.rds")
+head4 <- readRDS("C:/Users/nanda/Desktop/Master Thesis/head4_glmmSeq.rds")
+
+# Define a function to extract the correct AIC for GlmmSeq objects
+extract_AIC_glmmSeq <- function(glmm_model) {
+  # Access the statistics from the stats slot
+  stats <- glmm_model@stats$res
+  
+  # Extract the AIC value directly from the stats if available
+  if ("AIC" %in% colnames(stats)) {
+    total_AIC <- sum(stats[, "AIC"], na.rm = TRUE)
+  } else {
+    # If AIC is not directly available, calculate it using log-likelihood
+    logLik_values <- stats[, "logLik"]
+    num_params <- ncol(glmm_model@stats$coef) + 1  # fixed effects + dispersion
+    total_logLik <- sum(logLik_values, na.rm = TRUE)
+    total_AIC <- -2 * total_logLik + 2 * num_params
+  }
+  
+  return(total_AIC)
+}
+
+# Calculate AIC for each model using the correct method
+AIC_head1 <- extract_AIC_glmmSeq(head1)
+AIC_head2 <- extract_AIC_glmmSeq(head2)
+AIC_head3 <- extract_AIC_glmmSeq(head3)
+AIC_head4 <- extract_AIC_glmmSeq(head4)
+
+# Print the AIC values
+cat("AIC for head1:", AIC_head1, "\n")
+cat("AIC for head2:", AIC_head2, "\n")
+cat("AIC for head3:", AIC_head3, "\n")
+cat("AIC for head4:", AIC_head4, "\n")
+```
+The initial model without interaction terms between the coefficients imply that every sub-treatment (line, conditioned, experience) operated independently from each other. For instance, Line can create evolutionary adaptations with fixed and robust expression patterns. The lack of interaction terms implies that plastic responses to emerging from a specific host type does not interact with traits that were potentially fixed over the generations of the line sub-treatment. This also applies to the unique single occasion of ovipositioning, which represents the experience sub-treatment.
+The same pattern also applies to ovaries and venom glands.
+
+
+#### Relative contributions of each sub-treatment to the differential gene expression - Head
+Plot the significant genes in barplots, also create tables for relative contributions of treatment components with proportion of significant genes (not p-value!).
+
+
+```{r GLMM head plots, echo=TRUE, fig.show='hold', collapse=TRUE}
+
+#barplots for significant genes
+     # Define a significance threshold
+     q_threshold <- 0.05
+                  
+    # Extract the number of significant genes for each factor
+    num_significant_genes <- c(
+    Line = sum(qval_results_head@stats$qvals[, "Line"] < q_threshold),
+    Conditioned = sum(qval_results_head@stats$qvals[, "Conditioned"] < q_threshold),
+    Experience = sum(qval_results_head@stats$qvals[, "Experience"] < q_threshold))
+                  
+                  # Convert to data frame for plotting
+                  significant_genes_df <- as.data.frame(num_significant_genes)
+                  significant_genes_df$Factor <- rownames(significant_genes_df)
+                  colnames(significant_genes_df) <- c("Count", "Factor")
+                  
+                  # Create the bar plot using ggplot2
+                  library(ggplot2)
+                  ggplot(significant_genes_df, aes(x = Factor, y = Count, fill = Factor)) +
+                    geom_bar(stat = "identity") +
+                    scale_fill_manual(values = c("#0072B2", "#E69F00", "#009E73")) +  # Colors: Blue, Orange, Green
+                    labs(title = "Number of Significant Genes by Factor",
+                         x = "Factor",
+                         y = "Number of Significant Genes") +
+                    theme_minimal()
+
+                  
+                  
+#table + plots for coefficient of each factor + venn plots of overlapping genes
+      # Extract coefficients and p-values for each factor by using correct indexing
+      line_coefs <- results_head[, "LinePA"]
+      conditioned_coefs <- results_head[, "ConditionedPA"]
+      experience_coefs <- results_head[, "ExperiencePA"]
+      
+      line_pvals <- results_head[, "P_Line"]
+      conditioned_pvals <- results_head[, "P_Conditioned"]
+      experience_pvals <- results_head[, "P_Experience"]
+      
+      # Calculate summary statistics for each factor
+      summary_stats <- data.frame(
+        Factor = c("Line", "Conditioned", "Experience"),
+        Mean_Coefficient = c(mean(line_coefs, na.rm = TRUE), 
+                             mean(conditioned_coefs, na.rm = TRUE), 
+                             mean(experience_coefs, na.rm = TRUE)),
+        Median_Coefficient = c(median(line_coefs, na.rm = TRUE), 
+                               median(conditioned_coefs, na.rm = TRUE), 
+                               median(experience_coefs, na.rm = TRUE)),
+        Proportion_Significant = c(mean(line_pvals < 0.05, na.rm = TRUE), 
+                                   mean(conditioned_pvals < 0.05, na.rm = TRUE), 
+                                   mean(experience_pvals < 0.05, na.rm = TRUE))
+      )
+      
+      # Print summary statistics
+      print(summary_stats)
+      
+      
+      # Update the column names of summary_stats for better readability
+      colnames(summary_stats) <- c("Factor", "Mean Coefficient", "Median Coefficient", "Proportion Significant")
+      
+      # Display the summary statistics using kable with updated column names
+      kable(summary_stats, caption = "Summary of Factor Effects on Gene Expression") %>%
+        kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+      
+      
+        # Combine data into a long format for plotting
+      coefficients_df <- data.frame(
+        Factor = rep(c("Line", "Conditioned", "Experience"), each = length(line_coefs)),
+        Coefficient = c(line_coefs, conditioned_coefs, experience_coefs)
+      )
+      
+      # Boxplot of coefficients to show the distribution of effects
+      ggplot(coefficients_df, aes(x = Factor, y = Coefficient, fill = Factor)) +
+        geom_boxplot() +
+        labs(title = "Distribution of Coefficients by Factor", 
+             y = "Coefficient Value", 
+             x = "Factor") +
+        theme_minimal()
+      
+      # Barplot of the proportion of significant genes for each factor
+      ggplot(summary_stats, aes(x = Factor, y = `Proportion Significant`, fill = Factor)) +
+        geom_bar(stat = "identity") +
+        labs(title = "Proportion of Significant Genes by Factor", 
+             y = "Proportion Significant (p < 0.05)", 
+             x = "Factor") +
+        theme_minimal()
+      
+#overlapping genes between sub-treatments
+   
+    # Load your GLMM results for head tissue
+    fit_head <- readRDS("fit_head_norm.rds")
+    
+    # Extract q-values from the fit_head object
+    qval_results_head <- glmmQvals(fit_head)
+    
+    # Define a significance threshold for q-values
+    q_threshold <- 0.05
+    
+    # Extract significant genes for each factor in head tissue
+    significant_genes_line_head <- rownames(qval_results_head@stats$qvals)[qval_results_head@stats$qvals[, "Line"] < q_threshold]
+    significant_genes_conditioned_head <- rownames(qval_results_head@stats$qvals)[qval_results_head@stats$qvals[, "Conditioned"] < q_threshold]
+    significant_genes_experience_head <- rownames(qval_results_head@stats$qvals)[qval_results_head@stats$qvals[, "Experience"] < q_threshold]
+    
+    # Calculate overlapping genes for each comparison in head tissue
+    overlap_line_conditioned_head <- intersect(significant_genes_line_head, significant_genes_conditioned_head)
+    overlap_line_experience_head <- intersect(significant_genes_line_head, significant_genes_experience_head)
+    overlap_conditioned_experience_head <- intersect(significant_genes_conditioned_head, significant_genes_experience_head)
+    
+    # Calculate overlap between all three factors (Line, Conditioned, and Experience) for head tissue
+    overlap_line_conditioned_experience_head <- Reduce(intersect, list(significant_genes_line_head, 
+                                                                       significant_genes_conditioned_head, 
+                                                                       significant_genes_experience_head))
+    
+    # Create a data frame for the number of overlapping genes in head tissue
+    overlap_counts_df_head <- data.frame(
+      Comparison = c("Line vs Conditioned", 
+                     "Line vs Experience", 
+                     "Conditioned vs Experience", 
+                     "Line vs Conditioned vs Experience"),
+      Overlapping_Genes = c(length(overlap_line_conditioned_head),
+                            length(overlap_line_experience_head),
+                            length(overlap_conditioned_experience_head),
+                            length(overlap_line_conditioned_experience_head))
+    )
+    
+    # Save the table of overlapping counts to a CSV file for head tissue
+    write.csv(overlap_counts_df_head, file = "overlapping_gene_counts_head.csv", row.names = FALSE)
+    
+    
+   # Rename the columns
+    colnames(overlap_counts_df_head) <- c("Treatments", "Overlapping genes")
+
+    # Display the table of overlapping counts in R (formatted for R Markdown)
+    kable(overlap_counts_df_head, 
+    caption = "Number of overlapping genes between Line, Conditioned, and Experience (Head)") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+
+```
+Most significant genes from Experience (31 out of 38) overlap with the significant genes of Line and Conditioned. However, less than half of the significant genes of Line (186) overlap with the significant genes of Conditioned (904).
+
+Conditioned genes show the two-fold number of significant genes (proportion significant) in comparison to Line. Experience has by the far the lowest number of significant genes.
+
+
+### GLMM for ovaries
+Ovaries
+
+
+```{r GLMM ovaries, echo=TRUE, fig.show='hold', message=FALSE, warning=FALSE, collapse=TRUE}
+setwd("C:/Users/nanda/Desktop/Master Thesis")
+ 
+# Subset the data for ovaries tissue
+      ovaries_samples_data <- samples_data[samples_data$Tissue == "ovaries", ]
+      ovaries_counts_data <- filtered_counts_data[, rownames(ovaries_samples_data)]
+      
+      # Create DESeq2 object for ovaries tissue
+      dds_ovaries <- DESeqDataSetFromMatrix(countData = ovaries_counts_data,
+                                            colData = ovaries_samples_data,
+                                            design = ~ Line + Conditioned + Experience + Family)
+      
+      # Perform DESeq normalization and dispersion estimation for ovaries tissue
+      dds_ovaries <- DESeq(dds_ovaries)
+      dispersions_ovaries <- dispersions(dds_ovaries)
+      dispersions_ovaries <- setNames(dispersions_ovaries, rownames(ovaries_counts_data))
+      size_factors_ovaries <- sizeFactors(dds_ovaries)
+      
+      # Normalize counts by size factors
+      normalized_counts_ovaries <- sweep(ovaries_counts_data, 2, size_factors_ovaries, "/")
+      
+      # Fit the glmmSeq model for ovaries tissue
+      #fit_ovaries <- glmmSeq(~ Line + Conditioned + Experience + (1 | Family),
+       #                      countdata = normalized_counts_ovaries,
+        #                     metadata = ovaries_samples_data,
+         #                    dispersion = dispersions_ovaries,
+          #                   family = "nbinom",
+           #                  progress = TRUE)
+      
+      # Save and print results for ovaries tissue
+     #saveRDS(fit_ovaries, file = "fit_ovaries_norm.rds")
+      fit_ovaries <- readRDS("fit_ovaries_norm.rds")
+         #fit_ovaries <- readRDS("fit_ovaries.rds") #alternatively to the counts normalized by size factors
+      
+      results_ovaries <- summary(fit_ovaries)
+      #print(results_ovaries)
+      
+      # Save the q-value results for ovaries tissue
+      qval_results_ovaries <- glmmQvals(fit_ovaries)
+      
+```
+
+
+#### Model choice - Ovaries
+Check for best fitting model for ovaries too
+
+
+```{r GLMM ovaries model choice, echo=TRUE, fig.show='hold', collapse=TRUE}
+setwd("C:/Users/nanda/Desktop/Master Thesis")
+
+# Model 2: Interaction between Conditioned and Experience
+#ovaries2 <- glmmSeq(~ Line + Conditioned * Experience + (1 | Family),
+ #                   countdata = normalized_counts_ovaries,
+  #                  metadata = ovaries_samples_data,
+   #                 dispersion = dispersions_ovaries,
+    #                family = "nbinom",
+     #               progress = TRUE)
+
+# Model 3: Full interaction model
+#ovaries3 <- glmmSeq(~ Line * Conditioned * Experience + (1 | Family),
+ #                   countdata = normalized_counts_ovaries,
+  #                  metadata = ovaries_samples_data,
+   #                 dispersion = dispersions_ovaries,
+    #                family = "nbinom",
+     #               progress = TRUE)
+
+# Model 4: Interaction between Line and Conditioned + Experience
+#ovaries4 <- glmmSeq(~ Line * Conditioned + Experience + (1 | Family),
+ #                   countdata = normalized_counts_ovaries,
+  #                  metadata = ovaries_samples_data,
+   #                 dispersion = dispersions_ovaries,
+    #                family = "nbinom",
+     #               progress = TRUE)
+
+# Save models to disk for future use
+#saveRDS(ovaries2, file = "ovaries2_glmmSeq.rds")
+#saveRDS(ovaries3, file = "ovaries3_glmmSeq.rds")
+#saveRDS(ovaries4, file = "ovaries4_glmmSeq.rds")
+
+# Load your GLMM models for ovaries tissue (assuming these files are saved in your working directory)
+ovaries1 <- readRDS("fit_ovaries_norm.rds")
+ovaries2 <- readRDS("ovaries2_glmmSeq.rds")
+ovaries3 <- readRDS("ovaries3_glmmSeq.rds")
+ovaries4 <- readRDS("ovaries4_glmmSeq.rds")
+
+# Define a function to extract AIC for GlmmSeq objects
+extract_AIC_glmmSeq <- function(glmm_model) {
+  # Access the statistics from the stats slot
+  stats <- glmm_model@stats$res
+  
+  # Extract the AIC value directly from the stats if available
+  if ("AIC" %in% colnames(stats)) {
+    total_AIC <- sum(stats[, "AIC"], na.rm = TRUE)
+  } else {
+    # If AIC is not directly available, calculate it using log-likelihood
+    logLik_values <- stats[, "logLik"]
+    num_params <- ncol(glmm_model@stats$coef) + 1  # fixed effects + dispersion
+    total_logLik <- sum(logLik_values, na.rm = TRUE)
+    total_AIC <- -2 * total_logLik + 2 * num_params
+  }
+  
+  return(total_AIC)
+}
+
+# Calculate AIC for each ovaries model
+AIC_ovaries1 <- extract_AIC_glmmSeq(ovaries1)
+AIC_ovaries2 <- extract_AIC_glmmSeq(ovaries2)
+AIC_ovaries3 <- extract_AIC_glmmSeq(ovaries3)
+AIC_ovaries4 <- extract_AIC_glmmSeq(ovaries4)
+
+# Print the AIC values
+cat("AIC for ovaries1:", AIC_ovaries1, "\n")
+cat("AIC for ovaries2:", AIC_ovaries2, "\n")
+cat("AIC for ovaries3:", AIC_ovaries3, "\n")
+cat("AIC for ovaries4:", AIC_ovaries4, "\n")
+
+```
+
+Observations here are similar to those from the head model choice.
+
+
+#### Relative contributions of each sub-treatment to the differential gene expression - Ovaries
+Same procedure as for head tissue
+
+
+```{r GLMM ovaries plots, echo=TRUE, fig.show='hold', collapse=TRUE}
+#barplot significant genes
+     # Define a significance threshold
+     q_threshold <- 0.05
+                  
+     # Extract the number of significant genes for each factor in ovaries data
+       num_significant_genes_ovaries <- c(
+       Line = sum(qval_results_ovaries@stats$qvals[, "Line"] < q_threshold),
+       Conditioned = sum(qval_results_ovaries@stats$qvals[, "Conditioned"] < q_threshold),
+       Experience = sum(qval_results_ovaries@stats$qvals[, "Experience"] < q_threshold))
+                  
+                  # Convert to data frame for plotting
+                  significant_genes_ovaries_df <- as.data.frame(num_significant_genes_ovaries)
+                  significant_genes_ovaries_df$Factor <- rownames(significant_genes_ovaries_df)
+                  colnames(significant_genes_ovaries_df) <- c("Count", "Factor")
+                  
+                  # Create the bar plot using ggplot2
+                  library(ggplot2)
+                  ggplot(significant_genes_ovaries_df, aes(x = Factor, y = Count, fill = Factor)) +
+                    geom_bar(stat = "identity") +
+                    scale_fill_manual(values = c("#0072B2", "#E69F00", "#009E73")) +  # Colors: Blue, Orange, Green
+                    labs(title = "Number of Significant Genes by Factor (Ovaries)",
+                         x = "Factor",
+                         y = "Number of Significant Genes") +
+                    theme_minimal()
+                  
+                  
+#table + plots for coefficient of each factor
+      # Extract coefficients and p-values for each factor by using correct indexing for ovaries tissue
+      ovaries_line_coefs <- results_ovaries[, "LinePA"]
+      ovaries_conditioned_coefs <- results_ovaries[, "ConditionedPA"]
+      ovaries_experience_coefs <- results_ovaries[, "ExperiencePA"]
+      
+      ovaries_line_pvals <- results_ovaries[, "P_Line"]
+      ovaries_conditioned_pvals <- results_ovaries[, "P_Conditioned"]
+      ovaries_experience_pvals <- results_ovaries[, "P_Experience"]
+      
+      # Calculate summary statistics for each factor in ovaries tissue
+      ovaries_summary_stats <- data.frame(
+        Factor = c("Line", "Conditioned", "Experience"),
+        Mean_Coefficient = c(mean(ovaries_line_coefs, na.rm = TRUE), 
+                             mean(ovaries_conditioned_coefs, na.rm = TRUE), 
+                             mean(ovaries_experience_coefs, na.rm = TRUE)),
+        Median_Coefficient = c(median(ovaries_line_coefs, na.rm = TRUE), 
+                               median(ovaries_conditioned_coefs, na.rm = TRUE), 
+                               median(ovaries_experience_coefs, na.rm = TRUE)),
+        Proportion_Significant = c(mean(ovaries_line_pvals < 0.05, na.rm = TRUE), 
+                                   mean(ovaries_conditioned_pvals < 0.05, na.rm = TRUE), 
+                                   mean(ovaries_experience_pvals < 0.05, na.rm = TRUE))
+      )
+      
+      # Update the column names of ovaries_summary_stats for better readability
+      colnames(ovaries_summary_stats) <- c("Factor", "Mean Coefficient", "Median Coefficient", "Proportion Significant")
+      
+      # Display the summary statistics for ovaries tissue using kable with updated column names
+      kable(ovaries_summary_stats, caption = "Summary of Factor Effects on Gene Expression (Ovaries)") %>%
+        kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+      
+      # Combine data into a long format for plotting
+      ovaries_coefficients_df <- data.frame(
+        Factor = rep(c("Line", "Conditioned", "Experience"), each = length(ovaries_line_coefs)),
+        Coefficient = c(ovaries_line_coefs, ovaries_conditioned_coefs, ovaries_experience_coefs)
+      )
+      
+      # Boxplot of coefficients to show the distribution of effects for ovaries tissue
+      ggplot(ovaries_coefficients_df, aes(x = Factor, y = Coefficient, fill = Factor)) +
+        geom_boxplot() +
+        labs(title = "Distribution of Coefficients by Factor (Ovaries)", 
+             y = "Coefficient Value", 
+             x = "Factor") +
+        theme_minimal()
+      
+      # Barplot of the proportion of significant genes for each factor in ovaries tissue
+      ggplot(ovaries_summary_stats, aes(x = Factor, y = `Proportion Significant`, fill = Factor)) +
+        geom_bar(stat = "identity") +
+        labs(title = "Proportion of Significant Genes by Factor (Ovaries)", 
+             y = "Proportion Significant (p < 0.05)", 
+             x = "Factor") +
+        theme_minimal()
+      
+#overlapping genes
+            
+        
+    # Load your GLMM results for ovaries tissue
+    fit_ovaries <- readRDS("fit_ovaries_norm.rds")
+    
+    # Extract q-values from the fit_ovaries object
+    qval_results_ovaries <- glmmQvals(fit_ovaries)
+    
+    # Define a significance threshold for q-values
+    q_threshold <- 0.05
+    
+    # Extract significant genes for each factor in ovaries
+    significant_genes_line_ovaries <- rownames(qval_results_ovaries@stats$qvals)[qval_results_ovaries@stats$qvals[, "Line"] < q_threshold]
+    significant_genes_conditioned_ovaries <- rownames(qval_results_ovaries@stats$qvals)[qval_results_ovaries@stats$qvals[, "Conditioned"] < q_threshold]
+    significant_genes_experience_ovaries <- rownames(qval_results_ovaries@stats$qvals)[qval_results_ovaries@stats$qvals[, "Experience"] < q_threshold]
+    
+    # Calculate overlapping genes for each comparison in ovaries
+    overlap_line_conditioned_ovaries <- intersect(significant_genes_line_ovaries, significant_genes_conditioned_ovaries)
+    overlap_line_experience_ovaries <- intersect(significant_genes_line_ovaries, significant_genes_experience_ovaries)
+    overlap_conditioned_experience_ovaries <- intersect(significant_genes_conditioned_ovaries, significant_genes_experience_ovaries)
+    
+    # Calculate overlap between all three factors (Line, Conditioned, and Experience)
+    overlap_line_conditioned_experience <- Reduce(intersect, list(significant_genes_line_ovaries, 
+                                                                  significant_genes_conditioned_ovaries, 
+                                                                  significant_genes_experience_ovaries))
+    
+    # Create a data frame for the number of overlapping genes
+    overlap_counts_df <- data.frame(
+      Comparison = c("Line vs Conditioned", 
+                     "Line vs Experience", 
+                     "Conditioned vs Experience", 
+                     "Line vs Conditioned vs Experience"),
+      Overlapping_Genes = c(length(overlap_line_conditioned_ovaries),
+                            length(overlap_line_experience_ovaries),
+                            length(overlap_conditioned_experience_ovaries),
+                            length(overlap_line_conditioned_experience))
+    )
+    
+    # Save the table of overlapping counts to a CSV file
+    write.csv(overlap_counts_df, file = "overlapping_genes_ovaries.csv", row.names = FALSE)
+    
+    
+    
+    # Display the table of overlapping counts in R (formatted for R Markdown)
+    kable(overlap_counts_df, caption = "Number of Overlapping Genes Between Line, Conditioned, and Experience (Ovaries)") %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+```
+
+Most significant genes from Line (57 in total) and Experience (58 in total) overlap with each other (44 overlaps). The majority of Line and Conditioned genes also overlap with Conditioned: 46 for Line, 51 for Experience.
+
+Similarly to head, Conditioned has by far the highest number of significant genes in proportion to the total number of genes analyzed by the model, Experience the lowest.
+However, the ovaries show the lowest number of significant genes for each sub-treatment in comparison to the other tissue types, head, and venom glands. Line only has one more significant genes than Experience, and overall, the difference between Conditioned and the other two sub-treatments is low.
+
+
+### GLMM for venom glands
+Venom tissue
+
+
+```{r GLMM venom, echo=TRUE, fig.show='hold', message=FALSE, warning=FALSE, collapse=TRUE}
+ # Subset the data for venom tissue
+      venom_samples_data <- samples_data[samples_data$Tissue == "venom", ]
+      venom_counts_data <- filtered_counts_data[, rownames(venom_samples_data)]
+      
+      # Create DESeq2 object for venom tissue
+      dds_venom <- DESeqDataSetFromMatrix(countData = venom_counts_data,
+                                          colData = venom_samples_data,
+                                          design = ~ Line + Conditioned + Experience + Family)
+      
+      # Perform DESeq normalization and dispersion estimation for venom tissue
+      dds_venom <- DESeq(dds_venom)
+      dispersions_venom <- dispersions(dds_venom)
+      dispersions_venom <- setNames(dispersions_venom, rownames(venom_counts_data))
+      size_factors_venom <- sizeFactors(dds_venom)
+      
+      
+      # Normalize counts by size factors
+      normalized_counts_venom <- sweep(venom_counts_data, 2, size_factors_venom, "/")
+      
+      
+      # Fit the glmmSeq model for venom tissue
+      #fit_venom <- glmmSeq(~ Line + Conditioned + Experience + (1 | Family),
+       #                    countdata = normalized_counts_venom,
+        #                   metadata = venom_samples_data,
+         #                  dispersion = dispersions_venom,
+          #                 family = "nbinom",
+           #                progress = TRUE)
+      
+      # Save and print results for venom tissue
+      #saveRDS(fit_venom, file = "fit_venom_norm.rds")
+      fit_venom <- readRDS("fit_venom_norm.rds")
+        #fit_venom <- readRDS("fit_venom.rds") #alternatively to the counts normalized by size factors
+      
+      results_venom <- summary(fit_venom)
+      #print(results_venom)
+      
+      # Save the q-value results for venom tissue
+      qval_results_venom <- glmmQvals(fit_venom)
+```
+
+#### model choice - venom glands
+Same procedure and observation as in head and ovaries.
+
+```{r GLMM venom model choice, eval=FALSE, fig.show='hold', collapse=TRUE, include=FALSE}
+setwd("C:/Users/nanda/Desktop/Master Thesis")
+
+# Model 2: Interaction between Conditioned and Experience
+#venom2 <- glmmSeq(~ Line + Conditioned * Experience + (1 | Family),
+ #                 countdata = normalized_counts_venom,
+  #                metadata = venom_samples_data,
+   #               dispersion = dispersions_venom,
+    #              family = "nbinom",
+     #             progress = TRUE)
+
+# Model 3: Full interaction model
+#venom3 <- glmmSeq(~ Line * Conditioned * Experience + (1 | Family),
+ #                 countdata = normalized_counts_venom,
+  #                metadata = venom_samples_data,
+   #               dispersion = dispersions_venom,
+    #              family = "nbinom",
+     #             progress = TRUE)
+
+# Model 4: Interaction between Line and Conditioned + Experience
+#venom4 <- glmmSeq(~ Line * Conditioned + Experience + (1 | Family),
+ #                 countdata = normalized_counts_venom,
+  #                metadata = venom_samples_data,
+   #               dispersion = dispersions_venom,
+    #              family = "nbinom",
+     #             progress = TRUE)
+
+# Save models to disk for future use
+#saveRDS(venom2, file = "venom2_glmmSeq.rds")
+#saveRDS(venom3, file = "venom3_glmmSeq.rds")
+#saveRDS(venom4, file = "venom4_glmmSeq.rds")
+
+
+# Load your GLMM models for ovaries tissue (assuming these files are saved in your working directory)
+venom1 <- readRDS("fit_venom_norm.rds")
+venom2 <- readRDS("venom2_glmmSeq.rds")
+venom3 <- readRDS("venom3_glmmSeq.rds")
+venom4 <- readRDS("venom4_glmmSeq.rds")
+
+
+# Define a function to extract AIC for GlmmSeq objects
+extract_AIC_glmmSeq <- function(glmm_model) {
+  # Access the statistics from the stats slot
+  stats <- glmm_model@stats$res
+  
+  # Extract the AIC value directly from the stats if available
+  if ("AIC" %in% colnames(stats)) {
+    total_AIC <- sum(stats[, "AIC"], na.rm = TRUE)
+  } else {
+    # If AIC is not directly available, calculate it using log-likelihood
+    logLik_values <- stats[, "logLik"]
+    num_params <- ncol(glmm_model@stats$coef) + 1  # fixed effects + dispersion
+    total_logLik <- sum(logLik_values, na.rm = TRUE)
+    total_AIC <- -2 * total_logLik + 2 * num_params
+  }
+  
+  return(total_AIC)
+}
+
+# Calculate AIC for each venom model
+AIC_venom1 <- extract_AIC_glmmSeq(venom1)
+AIC_venom2 <- extract_AIC_glmmSeq(venom2)
+AIC_venom3 <- extract_AIC_glmmSeq(venom3)
+AIC_venom4 <- extract_AIC_glmmSeq(venom4)
+
+# Print the AIC values
+cat("AIC for venom1:", AIC_venom1, "\n")
+cat("AIC for venom2:", AIC_venom2, "\n")
+cat("AIC for venom3:", AIC_venom3, "\n")
+cat("AIC for venom4:", AIC_venom4, "\n")
+
+```
+The files are missing on my PC for some reason, I'll calculate the models again at some point, but the results were similar to those from head and ovaries.
+
+
+#### Relative contributions of each sub-treatment to the differential gene expression - Venom glands
+Same procedure as for head and ovaries.
+
+
+```{r GLMM venom plots, echo=TRUE, fig.show='hold', collapse=TRUE}
+
+#barplots for significant genes
+    # Define a significance threshold
+     q_threshold <- 0.05
+            
+    # Extract the number of significant genes for each factor in venom data
+      num_significant_genes_venom <- c(
+       Line = sum(qval_results_venom@stats$qvals[, "Line"] < q_threshold),
+        Conditioned = sum(qval_results_venom@stats$qvals[, "Conditioned"] < q_threshold),
+        Experience = sum(qval_results_venom@stats$qvals[, "Experience"] < q_threshold)
+            )
+            
+            # Convert to data frame for plotting
+            significant_genes_venom_df <- as.data.frame(num_significant_genes_venom)
+            significant_genes_venom_df$Factor <- rownames(significant_genes_venom_df)
+            colnames(significant_genes_venom_df) <- c("Count", "Factor")
+            
+            # Create the bar plot using ggplot2
+            library(ggplot2)
+            ggplot(significant_genes_venom_df, aes(x = Factor, y = Count, fill = Factor)) +
+              geom_bar(stat = "identity") +
+              scale_fill_manual(values = c("#0072B2", "#E69F00", "#009E73")) +  # Colors: Blue, Orange, Green
+              labs(title = "Number of Significant Genes by Factor (Venom)",
+                   x = "Factor",
+                   y = "Number of Significant Genes") +
+              theme_minimal()
+            
+#table + plots for coefficient of each factor
+    # Extract coefficients and p-values for each 
+     #factor by using correct indexing for venom tissue
+      venom_line_coefs <- results_venom[, "LinePA"]
+      venom_conditioned_coefs <- results_venom[, "ConditionedPA"]
+      venom_experience_coefs <- results_venom[, "ExperiencePA"]
+      
+      venom_line_pvals <- results_venom[, "P_Line"]
+      venom_conditioned_pvals <- results_venom[, "P_Conditioned"]
+      venom_experience_pvals <- results_venom[, "P_Experience"]
+      
+      # Calculate summary statistics for each factor in venom tissue
+      venom_summary_stats <- data.frame(
+        Factor = c("Line", "Conditioned", "Experience"),
+        Mean_Coefficient = c(mean(venom_line_coefs, na.rm = TRUE), 
+                             mean(venom_conditioned_coefs, na.rm = TRUE), 
+                             mean(venom_experience_coefs, na.rm = TRUE)),
+        Median_Coefficient = c(median(venom_line_coefs, na.rm = TRUE), 
+                               median(venom_conditioned_coefs, na.rm = TRUE), 
+                               median(venom_experience_coefs, na.rm = TRUE)),
+        Proportion_Significant = c(mean(venom_line_pvals < 0.05, na.rm = TRUE), 
+                                   mean(venom_conditioned_pvals < 0.05, na.rm = TRUE), 
+                                   mean(venom_experience_pvals < 0.05, na.rm = TRUE))
+      )
+      
+      # Update the column names of venom_summary_stats for better readability
+      colnames(venom_summary_stats) <- c("Factor", "Mean Coefficient", "Median Coefficient", "Proportion Significant")
+      
+      # Display the summary statistics for venom tissue using kable with updated column names
+      kable(venom_summary_stats, caption = "Summary of Factor Effects on Gene Expression (Venom)") %>%
+        kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+      
+      # Combine data into a long format for plotting
+      venom_coefficients_df <- data.frame(
+        Factor = rep(c("Line", "Conditioned", "Experience"), each = length(venom_line_coefs)),
+        Coefficient = c(venom_line_coefs, venom_conditioned_coefs, venom_experience_coefs)
+      )
+      
+      # Boxplot of coefficients to show the distribution of effects for venom tissue
+      ggplot(venom_coefficients_df, aes(x = Factor, y = Coefficient, fill = Factor)) +
+        geom_boxplot() +
+        labs(title = "Distribution of Coefficients by Factor (Venom)", 
+             y = "Coefficient Value", 
+             x = "Factor") +
+        theme_minimal()
+      
+      # Barplot of the proportion of significant genes for each factor in venom tissue
+      ggplot(venom_summary_stats, aes(x = Factor, y = `Proportion Significant`, fill = Factor)) +
+        geom_bar(stat = "identity") +
+        labs(title = "Proportion of Significant Genes by Factor (Venom)", 
+             y = "Proportion Significant (p < 0.05)", 
+             x = "Factor") +
+        theme_minimal()
+
+#overlapping genes
+      
+    # Load your GLMM results for venom tissue
+    fit_venom <- readRDS("fit_venom_norm.rds")
+    
+    # Extract q-values from the fit_venom object
+    qval_results_venom <- glmmQvals(fit_venom)
+    
+    # Define a significance threshold for q-values
+    q_threshold <- 0.05
+    
+    # Extract significant genes for each factor in venom tissue
+    significant_genes_line_venom <- rownames(qval_results_venom@stats$qvals)[qval_results_venom@stats$qvals[, "Line"] < q_threshold]
+    significant_genes_conditioned_venom <- rownames(qval_results_venom@stats$qvals)[qval_results_venom@stats$qvals[, "Conditioned"] < q_threshold]
+    significant_genes_experience_venom <- rownames(qval_results_venom@stats$qvals)[qval_results_venom@stats$qvals[, "Experience"] < q_threshold]
+    
+    # Calculate overlapping genes for each comparison in venom tissue
+    overlap_line_conditioned_venom <- intersect(significant_genes_line_venom, significant_genes_conditioned_venom)
+    overlap_line_experience_venom <- intersect(significant_genes_line_venom, significant_genes_experience_venom)
+    overlap_conditioned_experience_venom <- intersect(significant_genes_conditioned_venom, significant_genes_experience_venom)
+    
+    # Calculate overlap between all three factors (Line, Conditioned, and Experience) for venom tissue
+    overlap_line_conditioned_experience_venom <- Reduce(intersect, list(significant_genes_line_venom, 
+                                                                        significant_genes_conditioned_venom, 
+                                                                        significant_genes_experience_venom))
+    
+    # Create a data frame for the number of overlapping genes in venom tissue
+    overlap_counts_df_venom <- data.frame(
+      Comparison = c("Line vs Conditioned", 
+                     "Line vs Experience", 
+                     "Conditioned vs Experience", 
+                     "Line vs Conditioned vs Experience"),
+      Overlapping_Genes = c(length(overlap_line_conditioned_venom),
+                            length(overlap_line_experience_venom),
+                            length(overlap_conditioned_experience_venom),
+                            length(overlap_line_conditioned_experience_venom))
+    )
+    
+    # Save the table of overlapping counts to a CSV file for venom tissue
+    write.csv(overlap_counts_df_venom, file = "overlapping_genes_venom.csv", row.names = FALSE)
+    
+    # Display the table of overlapping counts in R (formatted for R Markdown)
+    kable(overlap_counts_df_venom, caption = "Number of Overlapping Genes Between Line, Conditioned, and Experience (Venom)") %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+```
+
+Again, the majority of significant genes of each sub-treatment overlap with each other. Also, the number of significant genes from experience is higher than in all remaining tissues, implying a higher relevance of the host encounter for venom gland transcriptome than for other tissues.
+
+Similarly to head, Conditioned has by far the highest number of significant genes in proportion to the total number of genes analyzed by the model, Experience the lowest.
+
+## Combined plots for GLMM
+
+```{r Combined GLMM plots, echo=TRUE, fig.show='hold', collapse=TRUE}
+# Libraries
+library(ggplot2)
+library(viridis)
+
+# Example of significant gene counts across tissues
+significant_genes_data <- data.frame(
+  Tissue = rep(c("Head", "Ovaries", "Venom Glands"), each = 3),
+  Sub_Treatment = rep(c("Line", "Conditioned", "Experience"), times = 3),
+  Count = c(
+    sum(qval_results_head@stats$qvals[, "Line"] < q_threshold),
+    sum(qval_results_head@stats$qvals[, "Conditioned"] < q_threshold),
+    sum(qval_results_head@stats$qvals[, "Experience"] < q_threshold),
+    sum(qval_results_ovaries@stats$qvals[, "Line"] < q_threshold),
+    sum(qval_results_ovaries@stats$qvals[, "Conditioned"] < q_threshold),
+    sum(qval_results_ovaries@stats$qvals[, "Experience"] < q_threshold),
+    sum(qval_results_venom@stats$qvals[, "Line"] < q_threshold),
+    sum(qval_results_venom@stats$qvals[, "Conditioned"] < q_threshold),
+    sum(qval_results_venom@stats$qvals[, "Experience"] < q_threshold)
+  )
+)
+
+# Plot
+ggplot(significant_genes_data, aes(x = Tissue, y = Count, fill = Sub_Treatment)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black", linewidth = 0.8) +
+  scale_fill_viridis_d(option = "C", direction = 1, name = "Sub-Treatment") +
+  labs(
+    title = "Number of Significant Genes by Sub-Treatments Across Tissues",
+    x = NULL,
+    y = "Number of Significant Genes"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 14),
+    axis.title.y = element_text(face = "bold", size = 14),
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    strip.text = element_text(size = 12, face = "bold"),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line.x = element_line(color = "black", linewidth = 0.8),
+    axis.line.y = element_line(color = "black", linewidth = 0.8),
+    axis.ticks = element_line(color = "black")
+  ) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.05))
+  )
+
+# Save the plot
+ggsave(
+  filename = "significant_genes_all_tissues.tiff",
+  dpi = 300, width = 12, height = 6, units = "in", device = "tiff"
+)
+
+
+```
+
+
+## Overlapping genes between tissue types
+
+```{r GLMM tissue type overlap, echo=TRUE, fig.show='hold', collapse=TRUE}
+# Load the GLMM results for each tissue
+fit_head <- readRDS("fit_head_norm.rds")
+fit_ovaries <- readRDS("fit_ovaries_norm.rds")
+fit_venom <- readRDS("fit_venom_norm.rds")
+
+# Extract q-values for each tissue
+qval_results_head <- glmmQvals(fit_head)
+qval_results_ovaries <- glmmQvals(fit_ovaries)
+qval_results_venom <- glmmQvals(fit_venom)
+
+# Define significance threshold
+q_threshold <- 0.05
+
+# Extract significant genes for each tissue type
+significant_genes_head <- rownames(qval_results_head@stats$qvals)[qval_results_head@stats$qvals[, "Line"] < q_threshold]
+significant_genes_ovaries <- rownames(qval_results_ovaries@stats$qvals)[qval_results_ovaries@stats$qvals[, "Line"] < q_threshold]
+significant_genes_venom <- rownames(qval_results_venom@stats$qvals)[qval_results_venom@stats$qvals[, "Line"] < q_threshold]
+
+# Calculate the pairwise overlaps between tissue types
+overlap_head_ovaries <- intersect(significant_genes_head, significant_genes_ovaries)
+overlap_head_venom <- intersect(significant_genes_head, significant_genes_venom)
+overlap_ovaries_venom <- intersect(significant_genes_ovaries, significant_genes_venom)
+
+# Calculate the overlap between all three tissue types
+overlap_all_tissues <- Reduce(intersect, list(significant_genes_head, significant_genes_ovaries, significant_genes_venom))
+
+# Create a data frame to show the overlap counts
+overlap_counts_df <- data.frame(
+  Comparison = c("Head vs Ovaries", "Head vs Venom", "Ovaries vs Venom", "All Tissues"),
+  Overlapping_Genes = c(length(overlap_head_ovaries),
+                        length(overlap_head_venom),
+                        length(overlap_ovaries_venom),
+                        length(overlap_all_tissues))
+)
+
+# Print the table in R Markdown using kable
+kable(overlap_counts_df, caption = "Number of Overlapping Genes Between Tissue Types") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+
+```
+
+AS shown in the preliminary results from the PCA, there are no overlapping genes between all tissue types, and only few in pairwise comparisons of the tissue types.
+
+
+
+
+
+## Volcano plots for significant genes from the models
+
+
+```{r GLMM volcano plots, echo=TRUE, fig.show='hold', collapse=TRUE}
+
+# Function to extract significant genes from glmmSeq results
+extract_significant_genes <- function(glmm_model, factor_name, q_threshold = 0.05) {
+  qvals <- glmmQvals(glmm_model)
+  significant_genes <- rownames(qvals@stats$qvals)[qvals@stats$qvals[, factor_name] < q_threshold]
+  return(significant_genes)
+}
+
+# Function to create volcano plots
+create_volcano_plot <- function(glmm_model, factor_name, tissue_type) {
+  results <- summary(glmm_model)
+  df <- data.frame(
+    Gene = rownames(results),
+    logFC = results[, paste0(factor_name, "PA")],
+    pvalue = results[, paste0("P_", factor_name)]
+  )
+  df$adj_pvalue <- p.adjust(df$pvalue, method = "fdr")
+  df$Significant <- df$adj_pvalue < 0.05
+  
+  ggplot(df, aes(x = logFC, y = -log10(pvalue), color = Significant)) +
+    geom_point(alpha = 0.8) +
+    scale_color_manual(values = c("grey", "red")) +
+    labs(title = paste("Volcano Plot for", factor_name, "in", tissue_type),
+         x = "Log Fold Change",
+         y = "-Log10(P-Value)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+}
+
+# Load GLMM models for each tissue type
+# Assuming these files exist and have been saved as .RDS files
+head1 <- readRDS("fit_head_norm.rds")
+ovaries1 <- readRDS("fit_ovaries_norm.rds")
+venom1 <- readRDS("fit_venom_norm.rds")
+
+# Generate volcano plots for each tissue type and each factor (Line, Conditioned, Experience)
+
+# Head Tissue
+volcano_plot_head_line <- create_volcano_plot(head1, "Line", "Head Tissue")
+volcano_plot_head_conditioned <- create_volcano_plot(head1, "Conditioned", "Head Tissue")
+volcano_plot_head_experience <- create_volcano_plot(head1, "Experience", "Head Tissue")
+
+# Ovaries Tissue
+volcano_plot_ovaries_line <- create_volcano_plot(ovaries1, "Line", "Ovaries Tissue")
+volcano_plot_ovaries_conditioned <- create_volcano_plot(ovaries1, "Conditioned", "Ovaries Tissue")
+volcano_plot_ovaries_experience <- create_volcano_plot(ovaries1, "Experience", "Ovaries Tissue")
+
+# Venom Tissue
+volcano_plot_venom_line <- create_volcano_plot(venom1, "Line", "Venom Tissue")
+volcano_plot_venom_conditioned <- create_volcano_plot(venom1, "Conditioned", "Venom Tissue")
+volcano_plot_venom_experience <- create_volcano_plot(venom1, "Experience", "Venom Tissue")
+
+# Display the plots
+print(volcano_plot_head_line)
+print(volcano_plot_head_conditioned)
+print(volcano_plot_head_experience)
+
+print(volcano_plot_ovaries_line)
+print(volcano_plot_ovaries_conditioned)
+print(volcano_plot_ovaries_experience)
+
+print(volcano_plot_venom_line)
+print(volcano_plot_venom_conditioned)
+print(volcano_plot_venom_experience)
+
+
+```
+
+
+Check which side stands for PA/FA
+
+
+```{r echo=TRUE, collapse = TRUE}
+
+# If Line, Conditioned, and Experience are not factors, convert them to factors
+samples_data$Line <- factor(samples_data$Line)
+samples_data$Conditioned <- factor(samples_data$Conditioned)
+samples_data$Experience <- factor(samples_data$Experience)
+
+# Confirm the levels of each factor
+levels(samples_data$Line)
+levels(samples_data$Conditioned)
+levels(samples_data$Experience)
+```
+
+
+Extract dataframes to save significant genes (q < 0.05) as csv.
+The coefficient column represents the logfold change from the corresponding GLMM.
+Genes with positive values are upregulated, genes with negative values downregulated.
+
+The QValue column represents the adj. p-values. These values were adjusted for multiple testing by using 
+the Benjamini-Hochberg method.
+
+
+```{r echo=TRUE, collapse = TRUE}
+#head
+    # Extract q-values, coefficients, standard errors, and p-values from the GlmmSeq object
+                #Line
+                    # Obtain the q-values, coefficients, etc., for the head tissue
+                    qvals_matrix_head <- qval_results_head@stats$qvals
+                    coef_matrix_head <- qval_results_head@stats$coef
+                    stderr_matrix_head <- qval_results_head@stats$stdErr
+                    pvals_matrix_head <- qval_results_head@stats$pvals
+                    
+                    
+                    # Set the significance threshold
+                    q_threshold <- 0.05
+                    
+                    # For the Line factor (head tissue)
+                    sig_genes_line_head <- rownames(qvals_matrix_head)[qvals_matrix_head[, "Line"] < q_threshold]
+                    
+                    # Create the data frame for Line using "LinePA" in coef_matrix and stderr_matrix
+                    head_line_df <- data.frame(
+                      Gene = sig_genes_line_head,
+                      Coefficient = coef_matrix_head[sig_genes_line_head, "LinePA"],
+                      StdError = stderr_matrix_head[sig_genes_line_head, "LinePA"],
+                      PValue = pvals_matrix_head[sig_genes_line_head, "Line"],
+                      QValue = qvals_matrix_head[sig_genes_line_head, "Line"]
+                    )
+                    
+                #Conditioned
+                    
+                    # For the Conditioned factor (head tissue)
+                    sig_genes_conditioned_head <- rownames(qvals_matrix_head)[qvals_matrix_head[, "Conditioned"] < q_threshold]
+                    
+                    # Create the data frame for Conditioned using "ConditionedPA" in coef_matrix and stderr_matrix
+                    head_conditioned_df <- data.frame(
+                      Gene = sig_genes_conditioned_head,
+                      Coefficient = coef_matrix_head[sig_genes_conditioned_head, "ConditionedPA"],
+                      StdError = stderr_matrix_head[sig_genes_conditioned_head, "ConditionedPA"],
+                      PValue = pvals_matrix_head[sig_genes_conditioned_head, "Conditioned"],
+                      QValue = qvals_matrix_head[sig_genes_conditioned_head, "Conditioned"]
+                    )
+              
+                #Experience
+                    
+                    # For the Experience factor (head tissue)
+                    sig_genes_experience_head <- rownames(qvals_matrix_head)[qvals_matrix_head[, "Experience"] < q_threshold]
+                    
+                    # Create the data frame for Experience using "ExperiencePA" in coef_matrix and stderr_matrix
+                    head_experience_df <- data.frame(
+                      Gene = sig_genes_experience_head,
+                      Coefficient = coef_matrix_head[sig_genes_experience_head, "ExperiencePA"],
+                      StdError = stderr_matrix_head[sig_genes_experience_head, "ExperiencePA"],
+                      PValue = pvals_matrix_head[sig_genes_experience_head, "Experience"],
+                      QValue = qvals_matrix_head[sig_genes_experience_head, "Experience"]
+                    )
+                    
+              #save CSVs
+                    write.csv(head_line_df, file = "head_line.csv", row.names = FALSE)
+                    write.csv(head_conditioned_df, file = "head_conditioned.csv", row.names = FALSE)
+                    write.csv(head_experience_df, file = "head_experience.csv", row.names = FALSE)
+    
+    
+#ovaries
+   # Extract q-values, coefficients, standard errors, and p-values from the GlmmSeq object
+            # Obtain the q-values, coefficients, etc., for the ovaries tissue
+            qval_results_ovaries <- glmmQvals(fit_ovaries)
+            qvals_matrix_ovaries <- qval_results_ovaries@stats$qvals
+            coef_matrix_ovaries <- qval_results_ovaries@stats$coef
+            stderr_matrix_ovaries <- qval_results_ovaries@stats$stdErr
+            pvals_matrix_ovaries <- qval_results_ovaries@stats$pvals
+            
+            # Set the significance threshold
+            q_threshold <- 0.05
+            
+              #Line
+                    sig_genes_line_ovaries <- rownames(qvals_matrix_ovaries)[qvals_matrix_ovaries[, "Line"] < q_threshold]
+                    
+                    # Create the data frame for Line using "LinePA" in coef_matrix and stderr_matrix
+                    ovaries_line_df <- data.frame(
+                      Gene = sig_genes_line_ovaries,
+                      Coefficient = coef_matrix_ovaries[sig_genes_line_ovaries, "LinePA"],
+                      StdError = stderr_matrix_ovaries[sig_genes_line_ovaries, "LinePA"],
+                      PValue = pvals_matrix_ovaries[sig_genes_line_ovaries, "Line"],
+                      QValue = qvals_matrix_ovaries[sig_genes_line_ovaries, "Line"]
+                    )
+                  
+              #Conditioned
+                    sig_genes_conditioned_ovaries <- rownames(qvals_matrix_ovaries)[qvals_matrix_ovaries[, "Conditioned"] < q_threshold]
+                    
+                    # Create the data frame for Conditioned using "ConditionedPA" in coef_matrix and stderr_matrix
+                    ovaries_conditioned_df <- data.frame(
+                      Gene = sig_genes_conditioned_ovaries,
+                      Coefficient = coef_matrix_ovaries[sig_genes_conditioned_ovaries, "ConditionedPA"],
+                      StdError = stderr_matrix_ovaries[sig_genes_conditioned_ovaries, "ConditionedPA"],
+                      PValue = pvals_matrix_ovaries[sig_genes_conditioned_ovaries, "Conditioned"],
+                      QValue = qvals_matrix_ovaries[sig_genes_conditioned_ovaries, "Conditioned"]
+                    )
+      
+              #Experience
+                    
+                    # For the Experience factor (ovaries tissue)
+                    sig_genes_experience_ovaries <- rownames(qvals_matrix_ovaries)[qvals_matrix_ovaries[, "Experience"] < q_threshold]
+                    
+                    # Create the data frame for Experience using "ExperiencePA" in coef_matrix and stderr_matrix
+                    ovaries_experience_df <- data.frame(
+                      Gene = sig_genes_experience_ovaries,
+                      Coefficient = coef_matrix_ovaries[sig_genes_experience_ovaries, "ExperiencePA"],
+                      StdError = stderr_matrix_ovaries[sig_genes_experience_ovaries, "ExperiencePA"],
+                      PValue = pvals_matrix_ovaries[sig_genes_experience_ovaries, "Experience"],
+                      QValue = qvals_matrix_ovaries[sig_genes_experience_ovaries, "Experience"]
+                    )
+              
+              #save CSVs
+                    write.csv(ovaries_line_df, file = "ovaries_line.csv", row.names = FALSE)
+                    write.csv(ovaries_conditioned_df, file = "ovaries_conditioned.csv", row.names = FALSE)
+                    write.csv(ovaries_experience_df, file = "ovaries_experience.csv", row.names = FALSE)                 
+
+#venom
+      # Extract q-values, coefficients, standard errors, and p-values from the GlmmSeq object
+      qvals_matrix <- qval_results_venom@stats$qvals
+      coef_matrix <- qval_results_venom@stats$coef
+      stderr_matrix <- qval_results_venom@stats$stdErr
+      pvals_matrix <- qval_results_venom@stats$pvals
+      
+      # Set the significance threshold
+      q_threshold <- 0.05
+      
+      # For the Line factor
+      sig_genes_line <- rownames(qvals_matrix)[qvals_matrix[, "Line"] < q_threshold]
+      
+            # Create the data frame for Line using "LinePA" in coef_matrix and stderr_matrix
+              venom_line_df <- data.frame(
+              Gene = sig_genes_line,
+              Coefficient = coef_matrix[sig_genes_line, "LinePA"],
+              StdError = stderr_matrix[sig_genes_line, "LinePA"],
+              PValue = pvals_matrix[sig_genes_line, "Line"],
+              QValue = qvals_matrix[sig_genes_line, "Line"]
+            )
+      
+      
+      # For the Conditioned factor
+      sig_genes_conditioned <- rownames(qvals_matrix)[qvals_matrix[, "Conditioned"] < q_threshold]
+            
+            # Create the data frame for Conditioned using "ConditionedPA" in coef_matrix and stderr_matrix
+              venom_conditioned_df <- data.frame(
+              Gene = sig_genes_conditioned,
+              Coefficient = coef_matrix[sig_genes_conditioned, "ConditionedPA"],
+              StdError = stderr_matrix[sig_genes_conditioned, "ConditionedPA"],
+              PValue = pvals_matrix[sig_genes_conditioned, "Conditioned"],
+              QValue = qvals_matrix[sig_genes_conditioned, "Conditioned"]
+            )
+            
+                  
+      # For the Experience factor
+      sig_genes_experience <- rownames(qvals_matrix)[qvals_matrix[, "Experience"] < q_threshold]
+      
+            # Create the data frame for Experience using "ExperiencePA" in coef_matrix and stderr_matrix
+              venom_experience_df <- data.frame(
+              Gene = sig_genes_experience,
+              Coefficient = coef_matrix[sig_genes_experience, "ExperiencePA"],
+              StdError = stderr_matrix[sig_genes_experience, "ExperiencePA"],
+              PValue = pvals_matrix[sig_genes_experience, "Experience"],
+              QValue = qvals_matrix[sig_genes_experience, "Experience"]
+            )
+              
+              
+          #save CSVs
+                  #write.csv(venom_line_df, file = "venom_line.csv", row.names = FALSE)
+                  #write.csv(venom_conditioned_df, file = "venom_conditioned.csv", row.names = FALSE)
+                  #write.csv(venom_experience_df, file = "venom_experience.csv", row.names = FALSE)
+```
+
+   
+## To do list
+Remaining objectives:
+
+- attempt to utilize the GLMM results to create heatmaps for treatment similarity based on the GLMM data.
+
+- GO enrichment analysis with the sets of genes from the GLMMs DONE
+
+- morpological quantification using phenopype DONE
+
+- write Thesis and hand in
